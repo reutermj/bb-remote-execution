@@ -191,6 +191,114 @@ func TestInMemoryBuildQueueExecuteBadRequest(t *testing.T) {
 	})
 }
 
+func TestInMemoryBuildQueueExecuteMultinodeCountValidation(t *testing.T) {
+	ctrl, ctx := gomock.WithContext(context.Background(), t)
+
+	contentAddressableStorage := mock.NewMockBlobAccess(ctrl)
+	clock := mock.NewMockClock(ctrl)
+	clock.EXPECT().Now().Return(time.Unix(0, 0))
+	uuidGenerator := mock.NewMockUUIDGenerator(ctrl)
+	actionRouter := mock.NewMockActionRouter(ctrl)
+	buildQueue := scheduler.NewInMemoryBuildQueue(contentAddressableStorage, clock, uuidGenerator.Call, &buildQueueConfigurationForTesting, 10000, actionRouter, allowAllAuthorizer, allowAllAuthorizer, allowAllAuthorizer, allowAllAuthorizer)
+	executionClient := getExecutionClient(t, buildQueue)
+
+	// multinode.count with invalid (non-integer) value should be rejected.
+	t.Run("InvalidMultinodeCountNotInteger", func(t *testing.T) {
+		action := &remoteexecution.Action{
+			CommandDigest: &remoteexecution.Digest{
+				Hash:      "61c585c297d00409bd477b6b80759c94ec545ab4",
+				SizeBytes: 456,
+			},
+			Platform: &remoteexecution.Platform{
+				Properties: []*remoteexecution.Platform_Property{
+					{Name: "cpu", Value: "armv6"},
+					{Name: "multinode.count", Value: "invalid"},
+					{Name: "os", Value: "linux"},
+				},
+			},
+		}
+		contentAddressableStorage.EXPECT().Get(
+			gomock.Any(),
+			digest.MustNewDigest("main", remoteexecution.DigestFunction_SHA1, "da39a3ee5e6b4b0d3255bfef95601890afd80709", 123),
+		).Return(buffer.NewProtoBufferFromProto(action, buffer.UserProvided))
+
+		stream, err := executionClient.Execute(ctx, &remoteexecution.ExecuteRequest{
+			InstanceName: "main",
+			ActionDigest: &remoteexecution.Digest{
+				Hash:      "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+				SizeBytes: 123,
+			},
+		})
+		require.NoError(t, err)
+		_, err = stream.Recv()
+		testutil.RequireEqualStatus(t, status.Error(codes.InvalidArgument, "Invalid multinode.count value \"invalid\": must be a positive integer"), err)
+	})
+
+	// multinode.count with zero value should be rejected.
+	t.Run("InvalidMultinodeCountZero", func(t *testing.T) {
+		action := &remoteexecution.Action{
+			CommandDigest: &remoteexecution.Digest{
+				Hash:      "61c585c297d00409bd477b6b80759c94ec545ab4",
+				SizeBytes: 456,
+			},
+			Platform: &remoteexecution.Platform{
+				Properties: []*remoteexecution.Platform_Property{
+					{Name: "cpu", Value: "armv6"},
+					{Name: "multinode.count", Value: "0"},
+					{Name: "os", Value: "linux"},
+				},
+			},
+		}
+		contentAddressableStorage.EXPECT().Get(
+			gomock.Any(),
+			digest.MustNewDigest("main", remoteexecution.DigestFunction_SHA1, "da39a3ee5e6b4b0d3255bfef95601890afd80709", 123),
+		).Return(buffer.NewProtoBufferFromProto(action, buffer.UserProvided))
+
+		stream, err := executionClient.Execute(ctx, &remoteexecution.ExecuteRequest{
+			InstanceName: "main",
+			ActionDigest: &remoteexecution.Digest{
+				Hash:      "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+				SizeBytes: 123,
+			},
+		})
+		require.NoError(t, err)
+		_, err = stream.Recv()
+		testutil.RequireEqualStatus(t, status.Error(codes.InvalidArgument, "Invalid multinode.count value 0: must be at least 1"), err)
+	})
+
+	// multinode.count exceeding the maximum (default 16) should be rejected.
+	t.Run("InvalidMultinodeCountExceedsMax", func(t *testing.T) {
+		action := &remoteexecution.Action{
+			CommandDigest: &remoteexecution.Digest{
+				Hash:      "61c585c297d00409bd477b6b80759c94ec545ab4",
+				SizeBytes: 456,
+			},
+			Platform: &remoteexecution.Platform{
+				Properties: []*remoteexecution.Platform_Property{
+					{Name: "cpu", Value: "armv6"},
+					{Name: "multinode.count", Value: "100"},
+					{Name: "os", Value: "linux"},
+				},
+			},
+		}
+		contentAddressableStorage.EXPECT().Get(
+			gomock.Any(),
+			digest.MustNewDigest("main", remoteexecution.DigestFunction_SHA1, "da39a3ee5e6b4b0d3255bfef95601890afd80709", 123),
+		).Return(buffer.NewProtoBufferFromProto(action, buffer.UserProvided))
+
+		stream, err := executionClient.Execute(ctx, &remoteexecution.ExecuteRequest{
+			InstanceName: "main",
+			ActionDigest: &remoteexecution.Digest{
+				Hash:      "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+				SizeBytes: 123,
+			},
+		})
+		require.NoError(t, err)
+		_, err = stream.Recv()
+		testutil.RequireEqualStatus(t, status.Error(codes.InvalidArgument, "multinode.count 100 exceeds maximum allowed value of 16"), err)
+	})
+}
+
 func TestInMemoryBuildQueuePurgeStaleWorkersAndQueues(t *testing.T) {
 	ctrl, ctx := gomock.WithContext(context.Background(), t)
 

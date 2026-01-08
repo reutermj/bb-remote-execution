@@ -213,6 +213,11 @@ type InMemoryBuildQueueConfiguration struct {
 	// worker may remain registered by InMemoryBuildQueue when no
 	// Synchronize() calls are received.
 	WorkerWithNoSynchronizationsTimeout time.Duration
+
+	// MaxMultinodeCount limits the maximum number of nodes in a
+	// multi-node execution group. Requests exceeding this are
+	// rejected with InvalidArgument. If zero, defaults to 16.
+	MaxMultinodeCount int
 }
 
 // InMemoryBuildQueue implements a BuildQueue that can distribute
@@ -408,6 +413,39 @@ func getRequestMetadata(ctx context.Context) *remoteexecution.RequestMetadata {
 	return nil
 }
 
+// defaultMaxMultinodeCount is used when MaxMultinodeCount is not configured.
+const defaultMaxMultinodeCount = 16
+
+// getMultinodeCount extracts and validates the multinode.count property
+// from the action's platform properties. Returns 1 for single-node
+// actions (no multinode.count specified), or the parsed count for
+// multi-node actions. Returns an error for invalid values.
+func (bq *InMemoryBuildQueue) getMultinodeCount(action *remoteexecution.Action) (int, error) {
+	if action.Platform == nil {
+		return 1, nil
+	}
+	for _, prop := range action.Platform.Properties {
+		if prop.Name == "multinode.count" {
+			count, err := strconv.Atoi(prop.Value)
+			if err != nil {
+				return 0, status.Errorf(codes.InvalidArgument, "Invalid multinode.count value %q: must be a positive integer", prop.Value)
+			}
+			if count < 1 {
+				return 0, status.Errorf(codes.InvalidArgument, "Invalid multinode.count value %d: must be at least 1", count)
+			}
+			maxCount := bq.configuration.MaxMultinodeCount
+			if maxCount == 0 {
+				maxCount = defaultMaxMultinodeCount
+			}
+			if count > maxCount {
+				return 0, status.Errorf(codes.InvalidArgument, "multinode.count %d exceeds maximum allowed value of %d", count, maxCount)
+			}
+			return count, nil
+		}
+	}
+	return 1, nil
+}
+
 // Execute an action by scheduling it in the build queue. This call
 // blocks until the action is completed.
 func (bq *InMemoryBuildQueue) Execute(in *remoteexecution.ExecuteRequest, out remoteexecution.Execution_ExecuteServer) error {
@@ -446,6 +484,14 @@ func (bq *InMemoryBuildQueue) Execute(in *remoteexecution.ExecuteRequest, out re
 	if err != nil {
 		return err
 	}
+
+	// Validate multinode.count if present. For now, we parse and
+	// validate but don't yet implement multi-node execution.
+	multinodeCount, err := bq.getMultinodeCount(action)
+	if err != nil {
+		return err
+	}
+	_ = multinodeCount // TODO: Implement multi-node execution
 
 	// Forward the client-provided authentication and request
 	// metadata, so that the worker logs it.
