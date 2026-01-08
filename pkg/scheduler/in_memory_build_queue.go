@@ -2959,13 +2959,20 @@ func (w *worker) assignNextQueuedTask(bq *InMemoryBuildQueue, scq *sizeClassQueu
 		// which to pick; always prefer directly queued
 		// operations over queued children.
 		if len(i.queuedOperations) > 0 {
-			// One or more operations are enqueued in this
-			// invocation directly. Pick the most preferable
-			// operation.
+			o := i.queuedOperations[0]
+			if o.task.group != nil {
+				// Head of queue is a multi-node task. Block until
+				// enough workers are idle to run it.
+				// TODO: Check idle worker count and assign all tasks
+				// when N workers are available.
+				return false
+			}
+			// Single-node task at head of queue - assign it.
 			scq.workerInvocationStickinessRetained.Observe(float64(stickinessRetained))
-			w.assignQueuedTask(bq, i.queuedOperations[0].task, stickinessRetained)
+			w.assignQueuedTask(bq, o.task, stickinessRetained)
 			return true
-		} else if len(i.queuedChildren) > 0 {
+		}
+		if len(i.queuedChildren) > 0 {
 			// One or more operations are enqueued in a
 			// child invocation.
 			//

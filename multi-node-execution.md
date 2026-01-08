@@ -107,16 +107,17 @@ When `Execute()` receives an action with `multinode.count > 1`:
 3. All tasks share the same `actionDigest` and base `desiredState`
 4. Schedule all N tasks (they will be queued until N workers are available)
 
-#### 2. schedule() - Non-Blocking Barrier
+#### 2. schedule() - Priority-Respecting Barrier
 
-Multi-node scheduling avoids head-of-line blocking. When `schedule()` is called on a grouped task:
+Multi-node tasks respect queue priority. When `schedule()` is called on a grouped task:
 
-1. Count available idle workers in the size class queue
-2. If fewer than N workers are available, queue the tasks normally
-3. Workers remain free to pick up other (single-node) work
-4. When N workers become idle, `assignAllWorkers()` assigns all tasks atomically
+1. Queue the task normally (grouped tasks are always queued, never immediately assigned)
+2. When a worker becomes idle and looks for work, it checks the head of the queue
+3. If the head task is a multi-node group, workers wait until N workers are idle
+4. Once N workers are idle, `assignAllWorkers()` assigns all tasks atomically
+5. If the head task is a single-node task, assign it normally
 
-This approach ensures idle workers aren't held waiting for a multi-node group to form.
+This approach ensures multi-node tasks are not starved by a continuous stream of single-node tasks.
 
 #### 3. Size Class Selection
 
@@ -165,9 +166,10 @@ Multi-node tasks use in-flight deduplication like single-node tasks. The first t
 When fewer than N workers are available:
 
 1. Tasks remain in QUEUED state
-2. Other single-node jobs can use available workers (no head-of-line blocking)
-3. Once N workers become idle, the group is assigned atomically
-4. Partial allocations are not held - workers remain available for other work
+2. If a multi-node task is at the head of the queue, idle workers wait (no work assigned)
+3. Single-node tasks behind the multi-node task also wait (priority is respected)
+4. Once N workers are idle, the multi-node group is assigned atomically
+5. After the multi-node task is assigned, normal queue processing resumes
 
 ## Configuration
 

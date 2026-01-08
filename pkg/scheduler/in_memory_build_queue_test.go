@@ -412,6 +412,334 @@ func TestInMemoryBuildQueueExecuteMultinodeTaskGroupCreation(t *testing.T) {
 	}, update)
 }
 
+// TestInMemoryBuildQueueExecuteMultinodeTaskStaysQueued verifies that
+// multi-node tasks are not assigned to workers until all N workers are
+// available. With only 1 worker, a multinode.count=4 task should remain queued.
+func TestInMemoryBuildQueueExecuteMultinodeTaskStaysQueued(t *testing.T) {
+	ctrl, ctx := gomock.WithContext(context.Background(), t)
+
+	contentAddressableStorage := mock.NewMockBlobAccess(ctrl)
+	clock := mock.NewMockClock(ctrl)
+	clock.EXPECT().Now().Return(time.Unix(0, 0))
+	uuidGenerator := mock.NewMockUUIDGenerator(ctrl)
+	actionRouter := mock.NewMockActionRouter(ctrl)
+	buildQueue := scheduler.NewInMemoryBuildQueue(contentAddressableStorage, clock, uuidGenerator.Call, &buildQueueConfigurationForTesting, 10000, actionRouter, allowAllAuthorizer, allowAllAuthorizer, allowAllAuthorizer, allowAllAuthorizer)
+	executionClient := getExecutionClient(t, buildQueue)
+
+	// Register a worker using Executing state first.
+	clock.EXPECT().Now().Return(time.Unix(1000, 0))
+	response, err := buildQueue.Synchronize(ctx, &remoteworker.SynchronizeRequest{
+		WorkerId: map[string]string{
+			"hostname": "worker123",
+			"thread":   "42",
+		},
+		InstanceNamePrefix: "main",
+		Platform:           platformForTesting,
+		SizeClass:          0,
+		CurrentState: &remoteworker.CurrentState{
+			WorkerState: &remoteworker.CurrentState_Executing_{
+				Executing: &remoteworker.CurrentState_Executing{
+					ActionDigest: &remoteexecution.Digest{
+						Hash:      "099a3f6dc1e8e91dbcca4ea964cd2237d4b11733",
+						SizeBytes: 123,
+					},
+					ExecutionState: &remoteworker.CurrentState_Executing_FetchingInputs{
+						FetchingInputs: &emptypb.Empty{},
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, response)
+
+	// Submit an action with multinode.count=4.
+	multinodePlatform := &remoteexecution.Platform{
+		Properties: []*remoteexecution.Platform_Property{
+			{Name: "cpu", Value: "armv6"},
+			{Name: "multinode.count", Value: "4"},
+			{Name: "os", Value: "linux"},
+		},
+	}
+	action := &remoteexecution.Action{
+		CommandDigest: &remoteexecution.Digest{
+			Hash:      "61c585c297d00409bd477b6b80759c94ec545ab4",
+			SizeBytes: 456,
+		},
+		Platform: multinodePlatform,
+	}
+	contentAddressableStorage.EXPECT().Get(
+		gomock.Any(),
+		digest.MustNewDigest("main", remoteexecution.DigestFunction_SHA1, "da39a3ee5e6b4b0d3255bfef95601890afd80709", 123),
+	).Return(buffer.NewProtoBufferFromProto(action, buffer.UserProvided))
+	initialSizeClassSelector := mock.NewMockSelector(ctrl)
+	actionRouter.EXPECT().RouteAction(gomock.Any(), gomock.Any(), testutil.EqProto(t, action), nil).Return(
+		action, platform.MustNewKey("main", platformForTesting), nil, initialSizeClassSelector, nil)
+	initialSizeClassLearner := mock.NewMockLearner(ctrl)
+	initialSizeClassSelector.EXPECT().Select([]uint32{0}).
+		Return(0, 15*time.Minute, 30*time.Minute, initialSizeClassLearner)
+	clock.EXPECT().Now().Return(time.Unix(1001, 0))
+
+	// 4 tasks created, each needs a UUID.
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b02"))
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b03"))
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b04"))
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b05"))
+	timer := mock.NewMockTimer(ctrl)
+	clock.EXPECT().NewTimer(time.Minute).Return(timer, nil)
+
+	stream, err := executionClient.Execute(ctx, &remoteexecution.ExecuteRequest{
+		InstanceName: "main",
+		ActionDigest: &remoteexecution.Digest{
+			Hash:      "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+			SizeBytes: 123,
+		},
+	})
+	require.NoError(t, err)
+
+	// Receive QUEUED update.
+	update, err := stream.Recv()
+	require.NoError(t, err)
+	metadata, err := anypb.New(&remoteexecution.ExecuteOperationMetadata{
+		Stage: remoteexecution.ExecutionStage_QUEUED,
+		ActionDigest: &remoteexecution.Digest{
+			Hash:      "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+			SizeBytes: 123,
+		},
+		DigestFunction: remoteexecution.DigestFunction_SHA1,
+	})
+	require.NoError(t, err)
+	testutil.RequireEqualProto(t, &longrunningpb.Operation{
+		Name:     "36ebab65-3c4f-4faf-818b-2eabb4cd1b02",
+		Metadata: metadata,
+	}, update)
+
+	// Now have the worker sync as idle. Since we need 4 workers but only
+	// have 1, the multi-node task should NOT be assigned.
+	// The worker will wait for work, so we need to fire the idle timer
+	// to make Synchronize return.
+	clock.EXPECT().Now().Return(time.Unix(1002, 0))
+	idleTimer := mock.NewMockTimer(ctrl)
+	idleTimerChannel := make(chan time.Time, 1)
+	idleTimerChannel <- time.Unix(1062, 0)
+	idleTimer.EXPECT().Stop()
+	clock.EXPECT().NewTimer(time.Minute).Return(idleTimer, idleTimerChannel)
+	response, err = buildQueue.Synchronize(ctx, &remoteworker.SynchronizeRequest{
+		WorkerId: map[string]string{
+			"hostname": "worker123",
+			"thread":   "42",
+		},
+		InstanceNamePrefix: "main",
+		Platform:           platformForTesting,
+		SizeClass:          0,
+		CurrentState: &remoteworker.CurrentState{
+			WorkerState: &remoteworker.CurrentState_Idle{
+				Idle: &emptypb.Empty{},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// The worker should be told to stay idle since the only queued task
+	// is a multi-node task that needs 4 workers.
+	testutil.RequireEqualProto(t, &remoteworker.SynchronizeResponse{
+		NextSynchronizationAt: &timestamppb.Timestamp{Seconds: 1062},
+		DesiredState: &remoteworker.DesiredState{
+			WorkerState: &remoteworker.DesiredState_Idle{
+				Idle: &emptypb.Empty{},
+			},
+		},
+	}, response)
+}
+
+// TestInMemoryBuildQueueExecuteMultinodeBlocksSingleNode verifies that
+// a single-node task queued behind a multi-node task is also blocked
+// until the multi-node task can be scheduled.
+func TestInMemoryBuildQueueExecuteMultinodeBlocksSingleNode(t *testing.T) {
+	ctrl, ctx := gomock.WithContext(context.Background(), t)
+
+	contentAddressableStorage := mock.NewMockBlobAccess(ctrl)
+	clock := mock.NewMockClock(ctrl)
+	clock.EXPECT().Now().Return(time.Unix(0, 0))
+	uuidGenerator := mock.NewMockUUIDGenerator(ctrl)
+	actionRouter := mock.NewMockActionRouter(ctrl)
+	buildQueue := scheduler.NewInMemoryBuildQueue(contentAddressableStorage, clock, uuidGenerator.Call, &buildQueueConfigurationForTesting, 10000, actionRouter, allowAllAuthorizer, allowAllAuthorizer, allowAllAuthorizer, allowAllAuthorizer)
+	executionClient := getExecutionClient(t, buildQueue)
+
+	// Register a worker using Executing state first.
+	clock.EXPECT().Now().Return(time.Unix(1000, 0))
+	response, err := buildQueue.Synchronize(ctx, &remoteworker.SynchronizeRequest{
+		WorkerId: map[string]string{
+			"hostname": "worker123",
+			"thread":   "42",
+		},
+		InstanceNamePrefix: "main",
+		Platform:           platformForTesting,
+		SizeClass:          0,
+		CurrentState: &remoteworker.CurrentState{
+			WorkerState: &remoteworker.CurrentState_Executing_{
+				Executing: &remoteworker.CurrentState_Executing{
+					ActionDigest: &remoteexecution.Digest{
+						Hash:      "099a3f6dc1e8e91dbcca4ea964cd2237d4b11733",
+						SizeBytes: 123,
+					},
+					ExecutionState: &remoteworker.CurrentState_Executing_FetchingInputs{
+						FetchingInputs: &emptypb.Empty{},
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, response)
+
+	// Submit a multi-node action (multinode.count=4) first.
+	multinodePlatform := &remoteexecution.Platform{
+		Properties: []*remoteexecution.Platform_Property{
+			{Name: "cpu", Value: "armv6"},
+			{Name: "multinode.count", Value: "4"},
+			{Name: "os", Value: "linux"},
+		},
+	}
+	multinodeAction := &remoteexecution.Action{
+		CommandDigest: &remoteexecution.Digest{
+			Hash:      "61c585c297d00409bd477b6b80759c94ec545ab4",
+			SizeBytes: 456,
+		},
+		Platform: multinodePlatform,
+	}
+	contentAddressableStorage.EXPECT().Get(
+		gomock.Any(),
+		digest.MustNewDigest("main", remoteexecution.DigestFunction_SHA1, "da39a3ee5e6b4b0d3255bfef95601890afd80709", 123),
+	).Return(buffer.NewProtoBufferFromProto(multinodeAction, buffer.UserProvided))
+	initialSizeClassSelector1 := mock.NewMockSelector(ctrl)
+	actionRouter.EXPECT().RouteAction(gomock.Any(), gomock.Any(), testutil.EqProto(t, multinodeAction), nil).Return(
+		multinodeAction, platform.MustNewKey("main", platformForTesting), nil, initialSizeClassSelector1, nil)
+	initialSizeClassLearner1 := mock.NewMockLearner(ctrl)
+	initialSizeClassSelector1.EXPECT().Select([]uint32{0}).
+		Return(0, 15*time.Minute, 30*time.Minute, initialSizeClassLearner1)
+	clock.EXPECT().Now().Return(time.Unix(1001, 0))
+
+	// 4 tasks created for multi-node.
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b02"))
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b03"))
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b04"))
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b05"))
+	timer1 := mock.NewMockTimer(ctrl)
+	clock.EXPECT().NewTimer(time.Minute).Return(timer1, nil)
+
+	stream1, err := executionClient.Execute(ctx, &remoteexecution.ExecuteRequest{
+		InstanceName: "main",
+		ActionDigest: &remoteexecution.Digest{
+			Hash:      "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+			SizeBytes: 123,
+		},
+	})
+	require.NoError(t, err)
+
+	// Receive QUEUED update for multi-node task.
+	update1, err := stream1.Recv()
+	require.NoError(t, err)
+	metadata1, err := anypb.New(&remoteexecution.ExecuteOperationMetadata{
+		Stage: remoteexecution.ExecutionStage_QUEUED,
+		ActionDigest: &remoteexecution.Digest{
+			Hash:      "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+			SizeBytes: 123,
+		},
+		DigestFunction: remoteexecution.DigestFunction_SHA1,
+	})
+	require.NoError(t, err)
+	testutil.RequireEqualProto(t, &longrunningpb.Operation{
+		Name:     "36ebab65-3c4f-4faf-818b-2eabb4cd1b02",
+		Metadata: metadata1,
+	}, update1)
+
+	// Now submit a single-node action (no multinode.count).
+	singleNodeAction := &remoteexecution.Action{
+		CommandDigest: &remoteexecution.Digest{
+			Hash:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			SizeBytes: 789,
+		},
+		Platform: platformForTesting,
+	}
+	contentAddressableStorage.EXPECT().Get(
+		gomock.Any(),
+		digest.MustNewDigest("main", remoteexecution.DigestFunction_SHA1, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 100),
+	).Return(buffer.NewProtoBufferFromProto(singleNodeAction, buffer.UserProvided))
+	initialSizeClassSelector2 := mock.NewMockSelector(ctrl)
+	actionRouter.EXPECT().RouteAction(gomock.Any(), gomock.Any(), testutil.EqProto(t, singleNodeAction), nil).Return(
+		singleNodeAction, platform.MustNewKey("main", platformForTesting), nil, initialSizeClassSelector2, nil)
+	initialSizeClassLearner2 := mock.NewMockLearner(ctrl)
+	initialSizeClassSelector2.EXPECT().Select([]uint32{0}).
+		Return(0, 15*time.Minute, 30*time.Minute, initialSizeClassLearner2)
+	clock.EXPECT().Now().Return(time.Unix(1002, 0))
+
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("11111111-1111-1111-1111-111111111111"))
+	timer2 := mock.NewMockTimer(ctrl)
+	clock.EXPECT().NewTimer(time.Minute).Return(timer2, nil)
+
+	stream2, err := executionClient.Execute(ctx, &remoteexecution.ExecuteRequest{
+		InstanceName: "main",
+		ActionDigest: &remoteexecution.Digest{
+			Hash:      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			SizeBytes: 100,
+		},
+	})
+	require.NoError(t, err)
+
+	// Receive QUEUED update for single-node task.
+	update2, err := stream2.Recv()
+	require.NoError(t, err)
+	metadata2, err := anypb.New(&remoteexecution.ExecuteOperationMetadata{
+		Stage: remoteexecution.ExecutionStage_QUEUED,
+		ActionDigest: &remoteexecution.Digest{
+			Hash:      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			SizeBytes: 100,
+		},
+		DigestFunction: remoteexecution.DigestFunction_SHA1,
+	})
+	require.NoError(t, err)
+	testutil.RequireEqualProto(t, &longrunningpb.Operation{
+		Name:     "11111111-1111-1111-1111-111111111111",
+		Metadata: metadata2,
+	}, update2)
+
+	// Now have the worker sync as idle. Even though there's a single-node
+	// task in the queue, it should NOT be assigned because the multi-node
+	// task is at the head and blocks the queue.
+	clock.EXPECT().Now().Return(time.Unix(1003, 0))
+	idleTimer := mock.NewMockTimer(ctrl)
+	idleTimerChannel := make(chan time.Time, 1)
+	idleTimerChannel <- time.Unix(1063, 0)
+	idleTimer.EXPECT().Stop()
+	clock.EXPECT().NewTimer(time.Minute).Return(idleTimer, idleTimerChannel)
+	response, err = buildQueue.Synchronize(ctx, &remoteworker.SynchronizeRequest{
+		WorkerId: map[string]string{
+			"hostname": "worker123",
+			"thread":   "42",
+		},
+		InstanceNamePrefix: "main",
+		Platform:           platformForTesting,
+		SizeClass:          0,
+		CurrentState: &remoteworker.CurrentState{
+			WorkerState: &remoteworker.CurrentState_Idle{
+				Idle: &emptypb.Empty{},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// The worker should be told to stay idle. The single-node task is blocked
+	// behind the multi-node task.
+	testutil.RequireEqualProto(t, &remoteworker.SynchronizeResponse{
+		NextSynchronizationAt: &timestamppb.Timestamp{Seconds: 1063},
+		DesiredState: &remoteworker.DesiredState{
+			WorkerState: &remoteworker.DesiredState_Idle{
+				Idle: &emptypb.Empty{},
+			},
+		},
+	}, response)
+}
 
 func TestInMemoryBuildQueuePurgeStaleWorkersAndQueues(t *testing.T) {
 	ctrl, ctx := gomock.WithContext(context.Background(), t)
