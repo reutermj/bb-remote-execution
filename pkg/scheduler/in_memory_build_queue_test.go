@@ -372,9 +372,16 @@ func TestInMemoryBuildQueueExecuteMultinodeTaskGroupCreation(t *testing.T) {
 	initialSizeClassSelector.EXPECT().Select([]uint32{0}).
 		Return(0, 15*time.Minute, 30*time.Minute, initialSizeClassLearner)
 	clock.EXPECT().Now().Return(time.Unix(1001, 0))
+
+	// With multinode.count=4, we create 4 tasks, each with an operation.
+	// Each operation needs a UUID, but only the first operation's
+	// waitExecution creates a timer.
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b02"))
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b03"))
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b04"))
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b05"))
 	timer := mock.NewMockTimer(ctrl)
 	clock.EXPECT().NewTimer(time.Minute).Return(timer, nil)
-	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b02"))
 
 	stream, err := executionClient.Execute(ctx, &remoteexecution.ExecuteRequest{
 		InstanceName: "main",
@@ -385,8 +392,9 @@ func TestInMemoryBuildQueueExecuteMultinodeTaskGroupCreation(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Verify we receive a QUEUED update, indicating the task group
-	// was created and the operation was queued successfully.
+	// Verify we receive a QUEUED update for the first operation.
+	// The client only sees one operation (the first task's operation),
+	// but 4 tasks were created internally.
 	update, err := stream.Recv()
 	require.NoError(t, err)
 	metadata, err := anypb.New(&remoteexecution.ExecuteOperationMetadata{
