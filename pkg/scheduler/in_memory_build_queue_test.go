@@ -412,6 +412,7 @@ func TestInMemoryBuildQueueExecuteMultinodeTaskGroupCreation(t *testing.T) {
 	}, update)
 }
 
+
 func TestInMemoryBuildQueuePurgeStaleWorkersAndQueues(t *testing.T) {
 	ctrl, ctx := gomock.WithContext(context.Background(), t)
 

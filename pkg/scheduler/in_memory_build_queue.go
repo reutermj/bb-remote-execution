@@ -2522,7 +2522,23 @@ func (t *task) reportNonFinalStageChange() {
 // a task to an idle worker that is synchronizing against the scheduler.
 // When no such worker exists, it will queue the operation, so that a
 // worker may pick it up later.
+//
+// For multi-node tasks (tasks with a group), scheduling is handled
+// differently: tasks are always queued and assigned together when
+// enough workers are available.
 func (t *task) schedule(bq *InMemoryBuildQueue) {
+	scq := t.getCurrentSizeClassQueue()
+
+	// Multi-node tasks must be queued and assigned together.
+	// Skip the immediate assignment path for grouped tasks.
+	if t.group != nil {
+		t.registerQueuedStageStarted(bq, &scq.tasksScheduledQueue)
+		for _, o := range t.operations {
+			o.enqueue()
+		}
+		return
+	}
+
 	// Check whether there are idle workers that are synchronizing
 	// against the scheduler on which we can schedule the operation
 	// directly.
@@ -2531,7 +2547,6 @@ func (t *task) schedule(bq *InMemoryBuildQueue) {
 	// invocations that have some similarity with those of the task,
 	// so that locality is improved. Scan the tree of invocations
 	// bottom up, breadth first to find an appropriate worker.
-	scq := t.getCurrentSizeClassQueue()
 	invocations := make([]*invocation, 0, len(t.operations))
 	for i := range t.operations {
 		invocations = append(invocations, i)
