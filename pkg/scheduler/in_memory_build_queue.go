@@ -8,6 +8,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -1763,29 +1764,61 @@ func (scq *sizeClassQueue) assignMultinodeTaskGroup(bq *InMemoryBuildQueue, g *t
 		return false
 	}
 
-	// Assign tasks: first task goes to currentWorker, rest to synchronizing workers.
+	// Collect all workers that will be assigned tasks.
+	// First worker is currentWorker, rest come from idleSynchronizingWorkers.
+	workers := make([]*worker, 0, g.requiredCount)
+	workers = append(workers, currentWorker)
+	scq.collectIdleSynchronizingWorkers(&scq.rootInvocation, neededFromQueue, &workers)
+
+	// Build MULTINODE_PEERS environment variable from worker addresses.
+	addresses := make([]string, len(workers))
+	for i, w := range workers {
+		workerID := w.workerKey.getWorkerID()
+		if addr, ok := workerID["ip"]; ok {
+			addresses[i] = addr
+		}
+	}
+	multinodePeers := strings.Join(addresses, ",")
+
+	// Assign tasks to workers.
 	for idx, t := range g.tasks {
 		// For the first task, mark it as scheduled via queue.
 		if idx == 0 {
 			t.registerQueuedStageStarted(bq, &scq.tasksScheduledQueue)
 		}
 
+		// Set MULTINODE_PEERS on this task's desiredState.
+		t.desiredState.AdditionalEnvironmentVariables = map[string]string{
+			"MULTINODE_PEERS": multinodePeers,
+		}
+
+		w := workers[idx]
 		if idx == 0 {
 			// Assign first task to the current worker.
-			currentWorker.assignUnqueuedTask(bq, t, 0)
+			w.assignUnqueuedTask(bq, t, 0)
 		} else {
-			// Find an idle worker by walking down the invocation tree
-			// from the root. We need to re-walk each time because
-			// assigning a worker modifies the tree structure.
-			i := &scq.rootInvocation
-			for len(i.idleSynchronizingWorkers) == 0 {
-				i = i.idleSynchronizingWorkersChildren[0]
-			}
-			w := i.idleSynchronizingWorkers[0].worker
+			// Assign to idle synchronizing worker and wake it up.
 			w.assignUnqueuedTaskAndWakeUp(bq, t, 0)
 		}
 	}
 	return true
+}
+
+// collectIdleSynchronizingWorkers collects up to n workers from the
+// idleSynchronizingWorkers tree into the provided slice.
+func (scq *sizeClassQueue) collectIdleSynchronizingWorkers(i *invocation, n int, workers *[]*worker) {
+	for _, entry := range i.idleSynchronizingWorkers {
+		if len(*workers)-1 >= n { // -1 because first worker is currentWorker
+			return
+		}
+		*workers = append(*workers, entry.worker)
+	}
+	for _, child := range i.idleSynchronizingWorkersChildren {
+		if len(*workers)-1 >= n {
+			return
+		}
+		scq.collectIdleSynchronizingWorkers(child, n, workers)
+	}
 }
 
 // countIdleSynchronizingWorkers recursively counts workers in idleSynchronizingWorkers.

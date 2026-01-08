@@ -188,6 +188,10 @@ message DesiredState {
 
     // The digest function that was used to compute the action digest.
     build.bazel.remote.execution.v2.DigestFunction.Value digest_function = 9;
+
+    // Additional environment variables to set when executing the action.
+    // Used by multi-node execution to provide peer addresses.
+    map<string, string> additional_environment_variables = 10;
   }
 
   oneof worker_state {

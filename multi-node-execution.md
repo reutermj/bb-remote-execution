@@ -28,25 +28,26 @@ cc_test(
 
 ### Worker Configuration
 
-Workers automatically detect and include their IP address in the `WorkerId` map. The IP is determined by checking which local address would be used to reach an external endpoint (e.g., `8.8.8.8`), which works correctly even behind NAT.
+Workers automatically detect and include their address in the `WorkerId` map under the key `"ip"`. By default, the address is determined by checking which local IP would be used to reach an external endpoint (e.g., `8.8.8.8`), which works correctly even behind NAT.
 
-The auto-detected IP can be overridden in the runner configuration if needed:
+The auto-detected address can be overridden in the runner configuration:
 
 ```jsonnet
 {
   runners: [{
     // ... other runner config ...
 
-    // Optional: Override auto-detected IP address
-    advertise_ip: "10.0.1.15",
+    // Optional: Override auto-detected address with IP or hostname
+    advertise_address: "worker-1.example.com",
   }],
 }
 ```
 
-**IP resolution priority:**
-1. `advertise_ip` config field (if set)
-2. `worker_id["ip"]` from config (legacy, for backwards compatibility)
-3. Auto-detected outbound IP address
+**Address resolution priority:**
+1. `advertise_address` config field (if set)
+2. Auto-detected outbound IP address
+
+The address can be either an IP (`10.0.1.15`) or a hostname (`worker-1.example.com`). If using hostnames, DNS resolution is the responsibility of the test binary.
 
 ### Environment Variables
 
@@ -54,9 +55,9 @@ Each worker receives this environment variable:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `MULTINODE_PEERS` | Comma-separated list of all peer IPs (ordered by index) | `10.0.1.15,10.0.1.16,10.0.1.17,10.0.1.18` |
+| `MULTINODE_PEERS` | Comma-separated list of all peer addresses (ordered by task index) | `10.0.1.15,10.0.1.16` or `worker-1.example.com,worker-2.example.com` |
 
-The test framework can derive the count from the list length and determine its own index by matching its IP against the list.
+The test framework can derive the node count from the list length and determine its own index by matching its address against the list.
 
 ## Architecture
 

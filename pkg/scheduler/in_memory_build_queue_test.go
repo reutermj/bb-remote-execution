@@ -758,12 +758,15 @@ func TestInMemoryBuildQueueExecuteMultinodeAssignment(t *testing.T) {
 	executionClient := getExecutionClient(t, buildQueue)
 
 	// Register 2 workers using Executing state (to establish platform).
+	// Each worker has an "ip" in their WorkerId for MULTINODE_PEERS.
+	workerIPs := []string{"10.0.1.10", "10.0.1.11"}
 	for i := 0; i < 2; i++ {
 		mockClock.EXPECT().Now().Return(time.Unix(1000+int64(i), 0))
 		response, err := buildQueue.Synchronize(ctx, &remoteworker.SynchronizeRequest{
 			WorkerId: map[string]string{
 				"hostname": "worker",
 				"thread":   fmt.Sprintf("%d", i),
+				"ip":       workerIPs[i],
 			},
 			InstanceNamePrefix: "main",
 			Platform:           platformForTesting,
@@ -863,6 +866,7 @@ func TestInMemoryBuildQueueExecuteMultinodeAssignment(t *testing.T) {
 			WorkerId: map[string]string{
 				"hostname": "worker",
 				"thread":   "0",
+				"ip":       workerIPs[0],
 			},
 			InstanceNamePrefix: "main",
 			Platform:           platformForTesting,
@@ -887,6 +891,7 @@ func TestInMemoryBuildQueueExecuteMultinodeAssignment(t *testing.T) {
 		WorkerId: map[string]string{
 			"hostname": "worker",
 			"thread":   "1",
+			"ip":       workerIPs[1],
 		},
 		InstanceNamePrefix: "main",
 		Platform:           platformForTesting,
@@ -903,11 +908,18 @@ func TestInMemoryBuildQueueExecuteMultinodeAssignment(t *testing.T) {
 	require.NotNil(t, response1.GetDesiredState().GetExecuting())
 	require.Equal(t, "da39a3ee5e6b4b0d3255bfef95601890afd80709", response1.GetDesiredState().GetExecuting().GetActionDigest().GetHash())
 
+	// Verify MULTINODE_PEERS is set. Worker 1 (currentWorker) is first,
+	// then Worker 0 (from idleSynchronizingWorkers).
+	expectedPeers := "10.0.1.11,10.0.1.10"
+	require.Equal(t, expectedPeers, response1.GetDesiredState().GetExecuting().GetAdditionalEnvironmentVariables()["MULTINODE_PEERS"])
+
 	// Worker 0 should be woken up and get Executing response.
 	select {
 	case response0 := <-worker0Done:
 		require.NotNil(t, response0.GetDesiredState().GetExecuting())
 		require.Equal(t, "da39a3ee5e6b4b0d3255bfef95601890afd80709", response0.GetDesiredState().GetExecuting().GetActionDigest().GetHash())
+		// Both workers get the same MULTINODE_PEERS value.
+		require.Equal(t, expectedPeers, response0.GetDesiredState().GetExecuting().GetAdditionalEnvironmentVariables()["MULTINODE_PEERS"])
 	case <-time.After(time.Second):
 		t.Fatal("Worker 0 did not receive response in time")
 	}
