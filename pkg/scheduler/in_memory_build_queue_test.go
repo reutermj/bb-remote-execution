@@ -2,6 +2,7 @@ package scheduler_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
@@ -739,6 +740,177 @@ func TestInMemoryBuildQueueExecuteMultinodeBlocksSingleNode(t *testing.T) {
 			},
 		},
 	}, response)
+}
+
+// TestInMemoryBuildQueueExecuteMultinodeAssignment verifies that when N
+// workers are idle, a multi-node task group is assigned to all of them.
+// Worker 0 syncs idle first and blocks waiting for more workers.
+// Worker 1 syncs idle and triggers assignment to both workers.
+func TestInMemoryBuildQueueExecuteMultinodeAssignment(t *testing.T) {
+	ctrl, ctx := gomock.WithContext(context.Background(), t)
+
+	contentAddressableStorage := mock.NewMockBlobAccess(ctrl)
+	mockClock := mock.NewMockClock(ctrl)
+	mockClock.EXPECT().Now().Return(time.Unix(0, 0))
+	uuidGenerator := mock.NewMockUUIDGenerator(ctrl)
+	actionRouter := mock.NewMockActionRouter(ctrl)
+	buildQueue := scheduler.NewInMemoryBuildQueue(contentAddressableStorage, mockClock, uuidGenerator.Call, &buildQueueConfigurationForTesting, 10000, actionRouter, allowAllAuthorizer, allowAllAuthorizer, allowAllAuthorizer, allowAllAuthorizer)
+	executionClient := getExecutionClient(t, buildQueue)
+
+	// Register 2 workers using Executing state (to establish platform).
+	for i := 0; i < 2; i++ {
+		mockClock.EXPECT().Now().Return(time.Unix(1000+int64(i), 0))
+		response, err := buildQueue.Synchronize(ctx, &remoteworker.SynchronizeRequest{
+			WorkerId: map[string]string{
+				"hostname": "worker",
+				"thread":   fmt.Sprintf("%d", i),
+			},
+			InstanceNamePrefix: "main",
+			Platform:           platformForTesting,
+			SizeClass:          0,
+			CurrentState: &remoteworker.CurrentState{
+				WorkerState: &remoteworker.CurrentState_Executing_{
+					Executing: &remoteworker.CurrentState_Executing{
+						ActionDigest: &remoteexecution.Digest{
+							Hash:      "099a3f6dc1e8e91dbcca4ea964cd2237d4b11733",
+							SizeBytes: 123,
+						},
+						ExecutionState: &remoteworker.CurrentState_Executing_FetchingInputs{
+							FetchingInputs: &emptypb.Empty{},
+						},
+					},
+				},
+			},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, response)
+	}
+
+	// Submit an action with multinode.count=2.
+	multinodePlatform := &remoteexecution.Platform{
+		Properties: []*remoteexecution.Platform_Property{
+			{Name: "cpu", Value: "armv6"},
+			{Name: "multinode.count", Value: "2"},
+			{Name: "os", Value: "linux"},
+		},
+	}
+	action := &remoteexecution.Action{
+		CommandDigest: &remoteexecution.Digest{
+			Hash:      "61c585c297d00409bd477b6b80759c94ec545ab4",
+			SizeBytes: 456,
+		},
+		Platform: multinodePlatform,
+	}
+	contentAddressableStorage.EXPECT().Get(
+		gomock.Any(),
+		digest.MustNewDigest("main", remoteexecution.DigestFunction_SHA1, "da39a3ee5e6b4b0d3255bfef95601890afd80709", 123),
+	).Return(buffer.NewProtoBufferFromProto(action, buffer.UserProvided))
+	initialSizeClassSelector := mock.NewMockSelector(ctrl)
+	actionRouter.EXPECT().RouteAction(gomock.Any(), gomock.Any(), testutil.EqProto(t, action), nil).Return(
+		action, platform.MustNewKey("main", platformForTesting), nil, initialSizeClassSelector, nil)
+	initialSizeClassLearner := mock.NewMockLearner(ctrl)
+	initialSizeClassSelector.EXPECT().Select([]uint32{0}).
+		Return(0, 15*time.Minute, 30*time.Minute, initialSizeClassLearner)
+	mockClock.EXPECT().Now().Return(time.Unix(1010, 0))
+
+	// 2 tasks created, each needs a UUID.
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b02"))
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b03"))
+	timer := mock.NewMockTimer(ctrl)
+	mockClock.EXPECT().NewTimer(time.Minute).Return(timer, nil)
+
+	stream, err := executionClient.Execute(ctx, &remoteexecution.ExecuteRequest{
+		InstanceName: "main",
+		ActionDigest: &remoteexecution.Digest{
+			Hash:      "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+			SizeBytes: 123,
+		},
+	})
+	require.NoError(t, err)
+
+	// Receive QUEUED update.
+	update, err := stream.Recv()
+	require.NoError(t, err)
+	metadata, err := anypb.New(&remoteexecution.ExecuteOperationMetadata{
+		Stage: remoteexecution.ExecutionStage_QUEUED,
+		ActionDigest: &remoteexecution.Digest{
+			Hash:      "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+			SizeBytes: 123,
+		},
+		DigestFunction: remoteexecution.DigestFunction_SHA1,
+	})
+	require.NoError(t, err)
+	testutil.RequireEqualProto(t, &longrunningpb.Operation{
+		Name:     "36ebab65-3c4f-4faf-818b-2eabb4cd1b02",
+		Metadata: metadata,
+	}, update)
+
+	// Worker 0 syncs idle - will block waiting for more workers.
+	// Use DoAndReturn to signal when worker 0 is about to block.
+	worker0InQueue := make(chan struct{})
+	mockClock.EXPECT().Now().Return(time.Unix(1020, 0))
+	idleTimer0 := mock.NewMockTimer(ctrl)
+	idleTimerChan0 := make(chan time.Time)
+	mockClock.EXPECT().NewTimer(time.Minute).DoAndReturn(func(d time.Duration) (clock.Timer, <-chan time.Time) {
+		close(worker0InQueue) // Signal that worker 0 is about to block
+		return idleTimer0, idleTimerChan0
+	})
+	idleTimer0.EXPECT().Stop().Return(true)
+
+	worker0Done := make(chan *remoteworker.SynchronizeResponse, 1)
+	go func() {
+		response, err := buildQueue.Synchronize(ctx, &remoteworker.SynchronizeRequest{
+			WorkerId: map[string]string{
+				"hostname": "worker",
+				"thread":   "0",
+			},
+			InstanceNamePrefix: "main",
+			Platform:           platformForTesting,
+			SizeClass:          0,
+			CurrentState: &remoteworker.CurrentState{
+				WorkerState: &remoteworker.CurrentState_Idle{
+					Idle: &emptypb.Empty{},
+				},
+			},
+		})
+		require.NoError(t, err)
+		worker0Done <- response
+	}()
+
+	// Wait for worker 0 to be in the blocking state.
+	<-worker0InQueue
+
+	// Worker 1 syncs idle - triggers assignment to both workers.
+	// Worker 1 needs one Now() call. Worker 0 also needs one when it wakes up.
+	mockClock.EXPECT().Now().Return(time.Unix(1021, 0)).Times(2)
+	response1, err := buildQueue.Synchronize(ctx, &remoteworker.SynchronizeRequest{
+		WorkerId: map[string]string{
+			"hostname": "worker",
+			"thread":   "1",
+		},
+		InstanceNamePrefix: "main",
+		Platform:           platformForTesting,
+		SizeClass:          0,
+		CurrentState: &remoteworker.CurrentState{
+			WorkerState: &remoteworker.CurrentState_Idle{
+				Idle: &emptypb.Empty{},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// Worker 1 should get Executing response immediately.
+	require.NotNil(t, response1.GetDesiredState().GetExecuting())
+	require.Equal(t, "da39a3ee5e6b4b0d3255bfef95601890afd80709", response1.GetDesiredState().GetExecuting().GetActionDigest().GetHash())
+
+	// Worker 0 should be woken up and get Executing response.
+	select {
+	case response0 := <-worker0Done:
+		require.NotNil(t, response0.GetDesiredState().GetExecuting())
+		require.Equal(t, "da39a3ee5e6b4b0d3255bfef95601890afd80709", response0.GetDesiredState().GetExecuting().GetActionDigest().GetHash())
+	case <-time.After(time.Second):
+		t.Fatal("Worker 0 did not receive response in time")
+	}
 }
 
 func TestInMemoryBuildQueuePurgeStaleWorkersAndQueues(t *testing.T) {

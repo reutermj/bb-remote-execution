@@ -1748,6 +1748,55 @@ func (scq *sizeClassQueue) markWorkerTerminating(w *worker) {
 	}
 }
 
+// assignMultinodeTaskGroup attempts to assign all tasks in a multi-node
+// task group to idle workers. The currentWorker is the worker that called
+// assignNextQueuedTask and is not yet in idleSynchronizingWorkers.
+// Returns true if assignment succeeded, false if not enough workers.
+func (scq *sizeClassQueue) assignMultinodeTaskGroup(bq *InMemoryBuildQueue, g *taskGroup, currentWorker *worker) bool {
+	// We need requiredCount-1 workers from idleSynchronizingWorkers,
+	// plus the currentWorker.
+	neededFromQueue := g.requiredCount - 1
+
+	// Count total synchronizing workers by walking the tree.
+	availableCount := scq.countIdleSynchronizingWorkers(&scq.rootInvocation)
+	if availableCount < neededFromQueue {
+		return false
+	}
+
+	// Assign tasks: first task goes to currentWorker, rest to synchronizing workers.
+	for idx, t := range g.tasks {
+		// For the first task, mark it as scheduled via queue.
+		if idx == 0 {
+			t.registerQueuedStageStarted(bq, &scq.tasksScheduledQueue)
+		}
+
+		if idx == 0 {
+			// Assign first task to the current worker.
+			currentWorker.assignUnqueuedTask(bq, t, 0)
+		} else {
+			// Find an idle worker by walking down the invocation tree
+			// from the root. We need to re-walk each time because
+			// assigning a worker modifies the tree structure.
+			i := &scq.rootInvocation
+			for len(i.idleSynchronizingWorkers) == 0 {
+				i = i.idleSynchronizingWorkersChildren[0]
+			}
+			w := i.idleSynchronizingWorkers[0].worker
+			w.assignUnqueuedTaskAndWakeUp(bq, t, 0)
+		}
+	}
+	return true
+}
+
+// countIdleSynchronizingWorkers recursively counts workers in idleSynchronizingWorkers.
+func (scq *sizeClassQueue) countIdleSynchronizingWorkers(i *invocation) int {
+	count := len(i.idleSynchronizingWorkers)
+	for _, child := range i.idleSynchronizingWorkersChildren {
+		count += scq.countIdleSynchronizingWorkers(child)
+	}
+	return count
+}
+
 // workerKey can be used as a key for maps to uniquely identify a worker
 // within the domain of a certain platform. This key is used for looking
 // up the state of a worker when synchronizing.
@@ -2960,11 +3009,15 @@ func (w *worker) assignNextQueuedTask(bq *InMemoryBuildQueue, scq *sizeClassQueu
 		// operations over queued children.
 		if len(i.queuedOperations) > 0 {
 			o := i.queuedOperations[0]
-			if o.task.group != nil {
-				// Head of queue is a multi-node task. Block until
-				// enough workers are idle to run it.
-				// TODO: Check idle worker count and assign all tasks
-				// when N workers are available.
+			if g := o.task.group; g != nil {
+				// Head of queue is a multi-node task. Check if we
+				// have enough idle workers to run it. We need
+				// requiredCount-1 synchronizing workers plus this
+				// worker (which is not yet in idleSynchronizingWorkers).
+				if scq.assignMultinodeTaskGroup(bq, g, w) {
+					return true
+				}
+				// Not enough workers yet - block.
 				return false
 			}
 			// Single-node task at head of queue - assign it.
