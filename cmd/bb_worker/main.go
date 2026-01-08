@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -427,6 +428,17 @@ func main() {
 					for k, v := range runnerConfiguration.WorkerId {
 						workerID[k] = v
 					}
+
+					// Set the worker's advertised address for multi-node execution.
+					// Priority: advertise_address config > auto-detected IP.
+					if _, hasIP := workerID["ip"]; !hasIP {
+						if addr := runnerConfiguration.AdvertiseAddress; addr != "" {
+							workerID["ip"] = addr
+						} else if detectedIP := detectOutboundIP(); detectedIP != "" {
+							workerID["ip"] = detectedIP
+						}
+					}
+
 					workerName, err := json.Marshal(workerID)
 					if err != nil {
 						return util.StatusWrap(err, "Failed to marshal worker ID")
@@ -541,4 +553,20 @@ func main() {
 		lifecycleState.MarkReadyAndWait(siblingsGroup)
 		return nil
 	})
+}
+
+// detectOutboundIP determines the local IP address that would be used
+// to reach an external endpoint. This works correctly even behind NAT
+// as it doesn't actually send any packets - it just checks routing.
+func detectOutboundIP() string {
+	// Use a well-known external address to determine the outbound interface.
+	// No actual connection is made since we use UDP.
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String()
 }

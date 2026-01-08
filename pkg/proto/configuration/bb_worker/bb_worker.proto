@@ -399,6 +399,13 @@ message RunnerConfiguration {
   // directory. This should typically be set to the primary group of the
   // user that is used by bb_runner to run actions.
   uint32 build_directory_owner_group_id = 16;
+
+  // Address (IP or hostname) to advertise to the scheduler for multi-node
+  // execution. If not set, the worker will auto-detect its outbound IP
+  // address by determining which local address would be used to reach an
+  // external endpoint. The auto-detected or configured address is sent to
+  // the scheduler as worker_id["ip"].
+  string advertise_address = 17;
 }
 
 message CompletedActionLoggingConfiguration {
