@@ -598,6 +598,15 @@ func (bq *InMemoryBuildQueue) Execute(in *remoteexecution.ExecuteRequest, out re
 		initialSizeClassLearner: initialSizeClassLearner,
 		stageChangeWakeup:       make(chan struct{}),
 	}
+
+	// For multi-node execution, create a task group.
+	// TODO: Create N tasks instead of just one.
+	if multinodeCount > 1 {
+		t.group = &taskGroup{
+			tasks:         []*task{t},
+			requiredCount: multinodeCount,
+		}
+	}
 	if !action.DoNotCache {
 		bq.inFlightDeduplicationMap[actionDigest] = t
 		scq.inFlightDeduplicationsNew.Inc()
