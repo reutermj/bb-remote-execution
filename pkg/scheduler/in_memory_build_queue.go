@@ -2379,6 +2379,31 @@ func (o *operation) maybeStartCleanup(bq *InMemoryBuildQueue) {
 	}
 }
 
+// taskGroup coordinates N tasks that must execute together for multi-node
+// execution. All tasks in a group share the same action and must be
+// assigned to workers simultaneously. The group tracks completion and
+// handles retries atomically - if any task fails, all are retried together.
+type taskGroup struct {
+	// tasks contains all tasks in this group. For a multi-node execution
+	// with count=N, this slice will have N elements.
+	tasks []*task
+
+	// requiredCount is the number of workers needed (from multinode.count).
+	requiredCount int
+
+	// completedCount tracks how many tasks have finished (success or failure).
+	completedCount int
+
+	// failed indicates if any task in the group has failed.
+	failed bool
+
+	// firstError holds the first error response if the group failed.
+	firstError *remoteexecution.ExecuteResponse
+
+	// retryCount tracks group-level retries (not per-task).
+	retryCount int
+}
+
 // task state that is created for every piece of work that needs to be
 // executed by a worker. Tasks are associated with one or more
 // operations. In the general case a task has one operation, but there
@@ -2412,6 +2437,10 @@ type task struct {
 
 	executeResponse   *remoteexecution.ExecuteResponse
 	stageChangeWakeup chan struct{}
+
+	// group is non-nil for multi-node tasks. All tasks in a group
+	// share the same taskGroup and must be assigned together.
+	group *taskGroup
 }
 
 // newOperation attaches a new operation to a task. This function must
