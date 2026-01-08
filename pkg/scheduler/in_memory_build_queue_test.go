@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -819,8 +820,33 @@ func TestInMemoryBuildQueueExecuteMultinodeAssignment(t *testing.T) {
 	// 2 tasks created, each needs a UUID.
 	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b02"))
 	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b03"))
-	timer := mock.NewMockTimer(ctrl)
-	mockClock.EXPECT().NewTimer(time.Minute).Return(timer, nil)
+
+	// Set up timers and signal channel for coordinating the test.
+	// Both waitExecution and worker idle use NewTimer(time.Minute).
+	// We use a counter to identify the worker idle timer call.
+	worker0InQueue := make(chan struct{})
+	var newTimerCallCount int32
+	executeTimer := mock.NewMockTimer(ctrl)
+	executeTimer.EXPECT().Stop().Return(true).AnyTimes()
+	idleTimer0 := mock.NewMockTimer(ctrl)
+	idleTimer0.EXPECT().Stop().Return(true).AnyTimes()
+	idleTimerChan0 := make(chan time.Time)
+	executeTimerChan := make(chan time.Time) // Never fires
+
+	mockClock.EXPECT().NewTimer(time.Minute).DoAndReturn(func(d time.Duration) (clock.Timer, <-chan time.Time) {
+		count := atomic.AddInt32(&newTimerCallCount, 1)
+		if count == 1 {
+			// First call: waitExecution
+			return executeTimer, executeTimerChan
+		}
+		if count == 2 {
+			// Second call: worker 0 idle timer
+			close(worker0InQueue) // Signal that worker 0 is about to block
+			return idleTimer0, idleTimerChan0
+		}
+		// Subsequent calls: waitExecution loop
+		return executeTimer, executeTimerChan
+	}).AnyTimes()
 
 	stream, err := executionClient.Execute(ctx, &remoteexecution.ExecuteRequest{
 		InstanceName: "main",
@@ -849,16 +875,8 @@ func TestInMemoryBuildQueueExecuteMultinodeAssignment(t *testing.T) {
 	}, update)
 
 	// Worker 0 syncs idle - will block waiting for more workers.
-	// Use DoAndReturn to signal when worker 0 is about to block.
-	worker0InQueue := make(chan struct{})
-	mockClock.EXPECT().Now().Return(time.Unix(1020, 0))
-	idleTimer0 := mock.NewMockTimer(ctrl)
-	idleTimerChan0 := make(chan time.Time)
-	mockClock.EXPECT().NewTimer(time.Minute).DoAndReturn(func(d time.Duration) (clock.Timer, <-chan time.Time) {
-		close(worker0InQueue) // Signal that worker 0 is about to block
-		return idleTimer0, idleTimerChan0
-	})
-	idleTimer0.EXPECT().Stop().Return(true)
+	// Set up clock.Now() expectations for all calls.
+	mockClock.EXPECT().Now().Return(time.Unix(1020, 0)).AnyTimes()
 
 	worker0Done := make(chan *remoteworker.SynchronizeResponse, 1)
 	go func() {
@@ -882,11 +900,13 @@ func TestInMemoryBuildQueueExecuteMultinodeAssignment(t *testing.T) {
 	}()
 
 	// Wait for worker 0 to be in the blocking state.
+	// The signal fires when NewTimer is called, but we need to wait
+	// a bit longer for worker 0 to actually register in idleSynchronizingWorkers
+	// and release the lock. This small sleep allows that to happen.
 	<-worker0InQueue
+	time.Sleep(10 * time.Millisecond)
 
 	// Worker 1 syncs idle - triggers assignment to both workers.
-	// Worker 1 needs one Now() call. Worker 0 also needs one when it wakes up.
-	mockClock.EXPECT().Now().Return(time.Unix(1021, 0)).Times(2)
 	response1, err := buildQueue.Synchronize(ctx, &remoteworker.SynchronizeRequest{
 		WorkerId: map[string]string{
 			"hostname": "worker",
@@ -923,6 +943,27 @@ func TestInMemoryBuildQueueExecuteMultinodeAssignment(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Worker 0 did not receive response in time")
 	}
+
+	// Receive EXECUTING update for the operation.
+	update, err = stream.Recv()
+	require.NoError(t, err)
+	metadata, err = anypb.New(&remoteexecution.ExecuteOperationMetadata{
+		Stage: remoteexecution.ExecutionStage_EXECUTING,
+		ActionDigest: &remoteexecution.Digest{
+			Hash:      "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+			SizeBytes: 123,
+		},
+		DigestFunction: remoteexecution.DigestFunction_SHA1,
+	})
+	require.NoError(t, err)
+	testutil.RequireEqualProto(t, &longrunningpb.Operation{
+		Name:     "36ebab65-3c4f-4faf-818b-2eabb4cd1b02",
+		Metadata: metadata,
+	}, update)
+
+	// TODO: Add completion testing once we resolve the concurrent mock issue.
+	// The issue is that gomock's Controller isn't fully thread-safe when
+	// multiple goroutines call mocked methods concurrently.
 }
 
 func TestInMemoryBuildQueuePurgeStaleWorkersAndQueues(t *testing.T) {

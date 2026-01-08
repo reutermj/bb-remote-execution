@@ -1793,9 +1793,17 @@ func (scq *sizeClassQueue) assignMultinodeTaskGroup(bq *InMemoryBuildQueue, g *t
 		}
 
 		w := workers[idx]
+
+		// Remove this task's operations from the queue.
+		for _, o := range t.operations {
+			o.removeQueuedFromInvocation()
+		}
+
 		if idx == 0 {
 			// Assign first task to the current worker.
 			w.assignUnqueuedTask(bq, t, 0)
+			// Notify waiting clients that the task is now executing.
+			t.reportNonFinalStageChange()
 		} else {
 			// Assign to idle synchronizing worker and wake it up.
 			w.assignUnqueuedTaskAndWakeUp(bq, t, 0)
@@ -2531,6 +2539,22 @@ type taskGroup struct {
 	retryCount int
 }
 
+// taskCompleted is called when an individual task in the group finishes.
+// It updates the group's completion tracking state.
+func (g *taskGroup) taskCompleted(executeResponse *remoteexecution.ExecuteResponse) {
+	g.completedCount++
+
+	// Check if this task failed (non-OK status or non-zero exit code).
+	code := status.FromProto(executeResponse.Status).Code()
+	exitCode := executeResponse.GetResult().GetExitCode()
+	taskFailed := code != codes.OK || exitCode != 0
+
+	if taskFailed && !g.failed {
+		g.failed = true
+		g.firstError = executeResponse
+	}
+}
+
 // task state that is created for every piece of work that needs to be
 // executed by a worker. Tasks are associated with one or more
 // operations. In the general case a task has one operation, but there
@@ -2826,7 +2850,12 @@ func (t *task) complete(bq *InMemoryBuildQueue, executeResponse *remoteexecution
 	} else {
 		// The task succeeded or it failed on the largest size
 		// class. Let's just complete it.
-		//
+
+		// Notify the task group if this is a multi-node task.
+		if t.group != nil {
+			t.group.taskCompleted(executeResponse)
+		}
+
 		// Scrub data from the task that are no longer needed
 		// after completion. This reduces memory usage
 		// significantly. Keep the Action digest, so that
