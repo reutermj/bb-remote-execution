@@ -577,6 +577,13 @@ func (bq *InMemoryBuildQueue) Execute(in *remoteexecution.ExecuteRequest, out re
 	}
 	pq := bq.platformQueues[platformQueueIndex]
 	sizeClassIndex, expectedDuration, timeout, initialSizeClassLearner := initialSizeClassSelector.Select(pq.sizeClasses)
+
+	// Multi-node tasks always use the largest size class to ensure
+	// consistent worker capabilities across all nodes.
+	if multinodeCount > 1 {
+		sizeClassIndex = len(pq.sizeClassQueues) - 1
+	}
+
 	scq := pq.sizeClassQueues[sizeClassIndex]
 
 	// Create the task(s).
