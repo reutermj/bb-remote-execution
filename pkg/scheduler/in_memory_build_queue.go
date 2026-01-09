@@ -2540,8 +2540,9 @@ type taskGroup struct {
 }
 
 // taskCompleted is called when an individual task in the group finishes.
-// It updates the group's completion tracking state.
-func (g *taskGroup) taskCompleted(executeResponse *remoteexecution.ExecuteResponse) {
+// It updates the group's completion tracking state. If the task failed,
+// all sibling tasks are cancelled.
+func (g *taskGroup) taskCompleted(bq *InMemoryBuildQueue, completedTask *task, executeResponse *remoteexecution.ExecuteResponse) {
 	g.completedCount++
 
 	// Check if this task failed (non-OK status or non-zero exit code).
@@ -2552,6 +2553,15 @@ func (g *taskGroup) taskCompleted(executeResponse *remoteexecution.ExecuteRespon
 	if taskFailed && !g.failed {
 		g.failed = true
 		g.firstError = executeResponse
+
+		// Cancel all sibling tasks. The complete() function is safe to
+		// call on already-completed tasks (it returns early).
+		cancelStatus := status.New(codes.Canceled, "Sibling task in multi-node group failed").Proto()
+		for _, t := range g.tasks {
+			if t != completedTask {
+				t.complete(bq, &remoteexecution.ExecuteResponse{Status: cancelStatus}, false)
+			}
+		}
 	}
 }
 
@@ -2853,7 +2863,7 @@ func (t *task) complete(bq *InMemoryBuildQueue, executeResponse *remoteexecution
 
 		// Notify the task group if this is a multi-node task.
 		if t.group != nil {
-			t.group.taskCompleted(executeResponse)
+			t.group.taskCompleted(bq, t, executeResponse)
 		}
 
 		// Scrub data from the task that are no longer needed
