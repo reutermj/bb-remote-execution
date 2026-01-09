@@ -2541,7 +2541,8 @@ type taskGroup struct {
 
 // taskCompleted is called when an individual task in the group finishes.
 // It updates the group's completion tracking state. If the task failed,
-// all sibling tasks are cancelled.
+// all sibling tasks are cancelled. When all tasks complete, it finalizes
+// the group by ensuring the primary task (task 0) has the correct response.
 func (g *taskGroup) taskCompleted(bq *InMemoryBuildQueue, completedTask *task, executeResponse *remoteexecution.ExecuteResponse) {
 	g.completedCount++
 
@@ -2562,6 +2563,30 @@ func (g *taskGroup) taskCompleted(bq *InMemoryBuildQueue, completedTask *task, e
 				t.complete(bq, &remoteexecution.ExecuteResponse{Status: cancelStatus}, false)
 			}
 		}
+	}
+
+	// Check if all tasks have completed.
+	if g.completedCount == g.requiredCount {
+		g.finalize(bq)
+	}
+}
+
+// finalize is called when all tasks in the group have completed. It ensures
+// the primary task (task 0) has the correct final response:
+// - On failure: the first error response
+// - On success: task 0 already has the correct response
+func (g *taskGroup) finalize(bq *InMemoryBuildQueue) {
+	if !g.failed {
+		// Success case: task 0 already has the correct executeResponse.
+		return
+	}
+
+	// Failure case: update task 0's executeResponse to the first error.
+	// This ensures the client waiting on task 0's operation sees the
+	// original failure, not a cancellation status.
+	primaryTask := g.tasks[0]
+	if primaryTask.executeResponse != nil && g.firstError != nil {
+		primaryTask.executeResponse = g.firstError
 	}
 }
 
@@ -2861,11 +2886,6 @@ func (t *task) complete(bq *InMemoryBuildQueue, executeResponse *remoteexecution
 		// The task succeeded or it failed on the largest size
 		// class. Let's just complete it.
 
-		// Notify the task group if this is a multi-node task.
-		if t.group != nil {
-			t.group.taskCompleted(bq, t, executeResponse)
-		}
-
 		// Scrub data from the task that are no longer needed
 		// after completion. This reduces memory usage
 		// significantly. Keep the Action digest, so that
@@ -2873,6 +2893,14 @@ func (t *task) complete(bq *InMemoryBuildQueue, executeResponse *remoteexecution
 		delete(bq.inFlightDeduplicationMap, t.actionDigest)
 		t.executeResponse = executeResponse
 		t.desiredState.Action = nil
+
+		// Notify the task group if this is a multi-node task.
+		// This must happen after setting executeResponse so that
+		// finalize() can update the primary task's response.
+		if t.group != nil {
+			t.group.taskCompleted(bq, t, executeResponse)
+		}
+
 		close(t.stageChangeWakeup)
 		t.stageChangeWakeup = nil
 

@@ -1241,10 +1241,9 @@ func TestInMemoryBuildQueueMultinodeFailureCancelsSiblings(t *testing.T) {
 	// Worker 1 should be told to go idle since its task was cancelled.
 	require.NotNil(t, response.GetDesiredState().GetIdle())
 
-	// Client should receive COMPLETED update.
-	// TODO(multinode): The client currently receives a cancellation status
-	// instead of the original failure. This needs investigation, but the
-	// sibling cancellation mechanism is working correctly.
+	// Client should receive COMPLETED update with the original failure.
+	// The group's finalize() function ensures that when any task fails,
+	// the client sees the original failure response, not a cancellation.
 	update, err = stream.Recv()
 	require.NoError(t, err)
 	metadata, err = anypb.New(&remoteexecution.ExecuteOperationMetadata{
@@ -1257,7 +1256,9 @@ func TestInMemoryBuildQueueMultinodeFailureCancelsSiblings(t *testing.T) {
 	})
 	require.NoError(t, err)
 	executeResponse, err := anypb.New(&remoteexecution.ExecuteResponse{
-		Status: status.New(codes.Canceled, "Sibling task in multi-node group failed").Proto(),
+		Result: &remoteexecution.ActionResult{
+			ExitCode: 1,
+		},
 	})
 	require.NoError(t, err)
 	testutil.RequireEqualProto(t, &longrunningpb.Operation{
