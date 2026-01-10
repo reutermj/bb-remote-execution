@@ -1,0 +1,14 @@
+{
+  "name": "bb-remote-execution",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "bazelbuild.vscode-bazel",
+        "golang.go",
+        "Anthropic.claude-code"
+      ]
+    }
+  },
+  "remoteUser": "vscode"
+}
