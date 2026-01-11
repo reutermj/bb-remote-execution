@@ -299,6 +299,122 @@ func TestInMemoryBuildQueueExecuteMultinodeCountValidation(t *testing.T) {
 	})
 }
 
+// TestInMemoryBuildQueueExecuteMultinodeTaskGroupCreation verifies that
+// a valid multinode_count creates a task group and queues the operation
+// successfully.
+func TestInMemoryBuildQueueExecuteMultinodeTaskGroupCreation(t *testing.T) {
+	ctrl, ctx := gomock.WithContext(context.Background(), t)
+
+	contentAddressableStorage := mock.NewMockBlobAccess(ctrl)
+	clock := mock.NewMockClock(ctrl)
+	clock.EXPECT().Now().Return(time.Unix(0, 0))
+	uuidGenerator := mock.NewMockUUIDGenerator(ctrl)
+	actionRouter := mock.NewMockActionRouter(ctrl)
+	buildQueue := scheduler.NewInMemoryBuildQueue(contentAddressableStorage, clock, uuidGenerator.Call, &buildQueueConfigurationForTesting, 10000, actionRouter, allowAllAuthorizer, allowAllAuthorizer, allowAllAuthorizer, allowAllAuthorizer)
+	executionClient := getExecutionClient(t, buildQueue)
+
+	// Register a worker so that the platform queue exists. Use Executing
+	// state to avoid creating an idle synchronization timer.
+	clock.EXPECT().Now().Return(time.Unix(1000, 0))
+	response, err := buildQueue.Synchronize(ctx, &remoteworker.SynchronizeRequest{
+		WorkerId: map[string]string{
+			"hostname": "worker123",
+			"thread":   "42",
+		},
+		InstanceNamePrefix: "main",
+		Platform:           platformForTesting,
+		SizeClass:          0,
+		CurrentState: &remoteworker.CurrentState{
+			WorkerState: &remoteworker.CurrentState_Executing_{
+				Executing: &remoteworker.CurrentState_Executing{
+					ActionDigest: &remoteexecution.Digest{
+						Hash:      "099a3f6dc1e8e91dbcca4ea964cd2237d4b11733",
+						SizeBytes: 123,
+					},
+					ExecutionState: &remoteworker.CurrentState_Executing_FetchingInputs{
+						FetchingInputs: &emptypb.Empty{},
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, response)
+
+	// Submit an action with multinode_count=4. This should create a
+	// task group and queue the operation successfully.
+	// The action's platform includes multinode_count, but processMultinodeCount
+	// strips it before RouteAction is called.
+	actionWithMultinode := &remoteexecution.Action{
+		CommandDigest: &remoteexecution.Digest{
+			Hash:      "61c585c297d00409bd477b6b80759c94ec545ab4",
+			SizeBytes: 456,
+		},
+		Platform: &remoteexecution.Platform{
+			Properties: []*remoteexecution.Platform_Property{
+				{Name: "cpu", Value: "armv6"},
+				{Name: "multinode_count", Value: "4"},
+				{Name: "os", Value: "linux"},
+			},
+		},
+	}
+	// After processMultinodeCount strips multinode_count, this is what RouteAction sees.
+	actionWithoutMultinode := &remoteexecution.Action{
+		CommandDigest: &remoteexecution.Digest{
+			Hash:      "61c585c297d00409bd477b6b80759c94ec545ab4",
+			SizeBytes: 456,
+		},
+		Platform: &remoteexecution.Platform{
+			Properties: []*remoteexecution.Platform_Property{
+				{Name: "cpu", Value: "armv6"},
+				{Name: "os", Value: "linux"},
+			},
+		},
+	}
+	contentAddressableStorage.EXPECT().Get(
+		gomock.Any(),
+		digest.MustNewDigest("main", remoteexecution.DigestFunction_SHA1, "da39a3ee5e6b4b0d3255bfef95601890afd80709", 123),
+	).Return(buffer.NewProtoBufferFromProto(actionWithMultinode, buffer.UserProvided))
+	initialSizeClassSelector := mock.NewMockSelector(ctrl)
+	// RouteAction receives the action with multinode_count already stripped.
+	actionRouter.EXPECT().RouteAction(gomock.Any(), gomock.Any(), testutil.EqProto(t, actionWithoutMultinode), nil).Return(
+		actionWithoutMultinode, platform.MustNewKey("main", platformForTesting), nil, initialSizeClassSelector, nil)
+	initialSizeClassLearner := mock.NewMockLearner(ctrl)
+	initialSizeClassSelector.EXPECT().Select([]uint32{0}).
+		Return(0, 15*time.Minute, 30*time.Minute, initialSizeClassLearner)
+	clock.EXPECT().Now().Return(time.Unix(1001, 0))
+	timer := mock.NewMockTimer(ctrl)
+	clock.EXPECT().NewTimer(time.Minute).Return(timer, nil)
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b02"))
+
+	stream, err := executionClient.Execute(ctx, &remoteexecution.ExecuteRequest{
+		InstanceName: "main",
+		ActionDigest: &remoteexecution.Digest{
+			Hash:      "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+			SizeBytes: 123,
+		},
+	})
+	require.NoError(t, err)
+
+	// Verify we receive a QUEUED update, indicating the task group
+	// was created and the operation was queued successfully.
+	update, err := stream.Recv()
+	require.NoError(t, err)
+	metadata, err := anypb.New(&remoteexecution.ExecuteOperationMetadata{
+		Stage: remoteexecution.ExecutionStage_QUEUED,
+		ActionDigest: &remoteexecution.Digest{
+			Hash:      "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+			SizeBytes: 123,
+		},
+		DigestFunction: remoteexecution.DigestFunction_SHA1,
+	})
+	require.NoError(t, err)
+	testutil.RequireEqualProto(t, &longrunningpb.Operation{
+		Name:     "36ebab65-3c4f-4faf-818b-2eabb4cd1b02",
+		Metadata: metadata,
+	}, update)
+}
+
 func TestInMemoryBuildQueuePurgeStaleWorkersAndQueues(t *testing.T) {
 	ctrl, ctx := gomock.WithContext(context.Background(), t)
 
