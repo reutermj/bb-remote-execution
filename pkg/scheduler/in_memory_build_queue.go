@@ -213,6 +213,11 @@ type InMemoryBuildQueueConfiguration struct {
 	// worker may remain registered by InMemoryBuildQueue when no
 	// Synchronize() calls are received.
 	WorkerWithNoSynchronizationsTimeout time.Duration
+
+	// MaxMultinodeCount limits the maximum number of nodes in a
+	// multi-node execution group. Requests exceeding this are
+	// rejected with InvalidArgument. If zero, defaults to 16.
+	MaxMultinodeCount int
 }
 
 // InMemoryBuildQueue implements a BuildQueue that can distribute
@@ -408,6 +413,65 @@ func getRequestMetadata(ctx context.Context) *remoteexecution.RequestMetadata {
 	return nil
 }
 
+// defaultMaxMultinodeCount is used when MaxMultinodeCount is not configured.
+const defaultMaxMultinodeCount = 16
+
+// processMultinodeCount extracts and validates the multinode_count property
+// from the action's platform properties. Returns:
+//   - The multinode count (1 for single-node, or the specified value)
+//   - A copy of the action with multinode_count removed from platform properties
+//     (so it doesn't affect worker matching)
+//   - An error if validation fails
+//
+// The multinode_count property is a scheduler directive, not a worker capability,
+// so it must be stripped before platform key creation.
+func (bq *InMemoryBuildQueue) processMultinodeCount(action *remoteexecution.Action) (int, *remoteexecution.Action, error) {
+	if action.Platform == nil {
+		return 1, action, nil
+	}
+
+	// Find multinode_count and validate it
+	multinodeCount := 1
+	foundIndex := -1
+	for i, prop := range action.Platform.Properties {
+		if prop.Name == "multinode_count" {
+			count, err := strconv.Atoi(prop.Value)
+			if err != nil {
+				return 0, nil, status.Errorf(codes.InvalidArgument, "Invalid multinode_count value %q: must be a positive integer", prop.Value)
+			}
+			if count < 1 {
+				return 0, nil, status.Errorf(codes.InvalidArgument, "Invalid multinode_count value %d: must be at least 1", count)
+			}
+			maxCount := bq.configuration.MaxMultinodeCount
+			if maxCount == 0 {
+				maxCount = defaultMaxMultinodeCount
+			}
+			if count > maxCount {
+				return 0, nil, status.Errorf(codes.InvalidArgument, "multinode_count %d exceeds maximum allowed value of %d", count, maxCount)
+			}
+			multinodeCount = count
+			foundIndex = i
+			break
+		}
+	}
+
+	// If multinode_count wasn't found, return original action unchanged
+	if foundIndex < 0 {
+		return 1, action, nil
+	}
+
+	// Create a copy of the action with multinode_count removed from platform
+	filteredProps := make([]*remoteexecution.Platform_Property, 0, len(action.Platform.Properties)-1)
+	for i, prop := range action.Platform.Properties {
+		if i != foundIndex {
+			filteredProps = append(filteredProps, prop)
+		}
+	}
+	filteredAction := *action
+	filteredAction.Platform = &remoteexecution.Platform{Properties: filteredProps}
+	return multinodeCount, &filteredAction, nil
+}
+
 // Execute an action by scheduling it in the build queue. This call
 // blocks until the action is completed.
 func (bq *InMemoryBuildQueue) Execute(in *remoteexecution.ExecuteRequest, out remoteexecution.Execution_ExecuteServer) error {
@@ -442,10 +506,14 @@ func (bq *InMemoryBuildQueue) Execute(in *remoteexecution.ExecuteRequest, out re
 		return util.StatusWrap(err, "Failed to obtain action")
 	}
 	action := actionMessage.(*remoteexecution.Action)
-	platformKey, err := platform.NewKey(instanceName, action.Platform)
+
+	// Process multinode_count: validate and strip from platform before routing.
+	// multinode_count is a scheduler directive, not a worker capability.
+	multinodeCount, action, err := bq.processMultinodeCount(action)
 	if err != nil {
 		return err
 	}
+	_ = multinodeCount // TODO: Implement multi-node execution
 
 	// Forward the client-provided authentication and request
 	// metadata, so that the worker logs it.
