@@ -130,7 +130,7 @@ func TestLocalBuildExecutorBuildDirectoryCreatorFailedFailed(t *testing.T) {
 	contentAddressableStorage := mock.NewMockBlobAccess(ctrl)
 	buildDirectoryCreator := mock.NewMockBuildDirectoryCreator(ctrl)
 	actionDigest := digest.MustNewDigest("netbsd", remoteexecution.DigestFunction_SHA256, "5555555555555555555555555555555555555555555555555555555555555555", 7)
-	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest).
+	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest, int32(0)).
 		Return(nil, nil, status.Error(codes.InvalidArgument, "Platform requirements not provided"))
 	runner := mock.NewMockRunnerClient(ctrl)
 	clock := mock.NewMockClock(ctrl)
@@ -184,7 +184,7 @@ func TestLocalBuildExecutorInputRootPopulationFailed(t *testing.T) {
 	buildDirectoryCreator := mock.NewMockBuildDirectoryCreator(ctrl)
 	buildDirectory := mock.NewMockBuildDirectory(ctrl)
 	actionDigest := digest.MustNewDigest("netbsd", remoteexecution.DigestFunction_SHA256, "5555555555555555555555555555555555555555555555555555555555555555", 7)
-	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest).
+	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest, int32(0)).
 		Return(buildDirectory, nil, nil)
 	filePool := mock.NewMockFilePool(ctrl)
 	monitor := mock.NewMockUnreadDirectoryMonitor(ctrl)
@@ -260,7 +260,7 @@ func TestLocalBuildExecutorOutputDirectoryCreationFailure(t *testing.T) {
 	buildDirectoryCreator := mock.NewMockBuildDirectoryCreator(ctrl)
 	buildDirectory := mock.NewMockBuildDirectory(ctrl)
 	actionDigest := digest.MustNewDigest("fedora", remoteexecution.DigestFunction_SHA256, "5555555555555555555555555555555555555555555555555555555555555555", 7)
-	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest).
+	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest, int32(0)).
 		Return(buildDirectory, nil, nil)
 	filePool := mock.NewMockFilePool(ctrl)
 	monitor := mock.NewMockUnreadDirectoryMonitor(ctrl)
@@ -331,7 +331,7 @@ func TestLocalBuildExecutorMissingCommand(t *testing.T) {
 	buildDirectoryCreator := mock.NewMockBuildDirectoryCreator(ctrl)
 	buildDirectory := mock.NewMockBuildDirectory(ctrl)
 	actionDigest := digest.MustNewDigest("netbsd", remoteexecution.DigestFunction_SHA256, "5555555555555555555555555555555555555555555555555555555555555555", 7)
-	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest).
+	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest, int32(0)).
 		Return(buildDirectory, nil, nil)
 	filePool := mock.NewMockFilePool(ctrl)
 	monitor := mock.NewMockUnreadDirectoryMonitor(ctrl)
@@ -426,7 +426,7 @@ func TestLocalBuildExecutorOutputSymlinkReadingFailure(t *testing.T) {
 
 	buildDirectoryCreator := mock.NewMockBuildDirectoryCreator(ctrl)
 	actionDigest := digest.MustNewDigest("nintendo64", remoteexecution.DigestFunction_SHA256, "5555555555555555555555555555555555555555555555555555555555555555", 7)
-	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest).
+	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest, int32(0)).
 		Return(buildDirectory, nil, nil)
 	filePool := mock.NewMockFilePool(ctrl)
 	monitor := mock.NewMockUnreadDirectoryMonitor(ctrl)
@@ -638,7 +638,7 @@ func TestLocalBuildExecutorSuccess(t *testing.T) {
 	// Command execution.
 	buildDirectoryCreator := mock.NewMockBuildDirectoryCreator(ctrl)
 	actionDigest := digest.MustNewDigest("ubuntu1804", remoteexecution.DigestFunction_SHA256, "0000000000000000000000000000000000000000000000000000000000000001", 123)
-	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest).
+	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest, int32(0)).
 		Return(buildDirectory, ((*path.Trace)(nil)).Append(path.MustNewComponent("0000000000000000")), nil)
 	filePool := mock.NewMockFilePool(ctrl)
 	monitor := mock.NewMockUnreadDirectoryMonitor(ctrl)
@@ -857,7 +857,7 @@ func TestLocalBuildExecutorInputRootIOFailureDuringExecution(t *testing.T) {
 	// Build environment.
 	buildDirectoryCreator := mock.NewMockBuildDirectoryCreator(ctrl)
 	actionDigest := digest.MustNewDigest("ubuntu1804", remoteexecution.DigestFunction_SHA256, "0000000000000000000000000000000000000000000000000000000000000001", 123)
-	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest).
+	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest, int32(0)).
 		Return(buildDirectory, nil, nil)
 	filePool := mock.NewMockFilePool(ctrl)
 	monitor := mock.NewMockUnreadDirectoryMonitor(ctrl)
@@ -990,7 +990,7 @@ func TestLocalBuildExecutorTimeoutDuringExecution(t *testing.T) {
 	// Build environment.
 	buildDirectoryCreator := mock.NewMockBuildDirectoryCreator(ctrl)
 	actionDigest := digest.MustNewDigest("ubuntu1804", remoteexecution.DigestFunction_SHA256, "0000000000000000000000000000000000000000000000000000000000000001", 123)
-	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest).
+	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest, int32(0)).
 		Return(buildDirectory, nil, nil)
 	filePool := mock.NewMockFilePool(ctrl)
 	monitor := mock.NewMockUnreadDirectoryMonitor(ctrl)
@@ -1117,7 +1117,7 @@ func TestLocalBuildExecutorCharacterDeviceNodeCreationFailed(t *testing.T) {
 	// Build environment.
 	buildDirectoryCreator := mock.NewMockBuildDirectoryCreator(ctrl)
 	actionDigest := digest.MustNewDigest("ubuntu1804", remoteexecution.DigestFunction_SHA256, "0000000000000000000000000000000000000000000000000000000000000001", 123)
-	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest).
+	buildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest, int32(0)).
 		Return(buildDirectory, nil, nil)
 	filePool := mock.NewMockFilePool(ctrl)
 	monitor := mock.NewMockUnreadDirectoryMonitor(ctrl)

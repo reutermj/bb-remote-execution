@@ -188,6 +188,15 @@ message DesiredState {
 
     // The digest function that was used to compute the action digest.
     build.bazel.remote.execution.v2.DigestFunction.Value digest_function = 9;
+
+    // For multi-node execution, the index of this task within the group
+    // (0 to multinode_count-1). When set to a non-zero value, indicates
+    // this task is part of a multi-node group and may run in parallel
+    // with other tasks sharing the same action digest. The worker uses
+    // this to create unique build directories for each task.
+    // When zero or unset, the task is either single-node or the first
+    // task in a multi-node group.
+    int32 multinode_task_index = 10;
   }
 
   oneof worker_state {

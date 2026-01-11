@@ -26,7 +26,7 @@ func TestRootBuildDirectoryCreator(t *testing.T) {
 	// closed, as it is reused by the next build action.
 	mockBuildDirectory.EXPECT().Mkdir(path.MustNewComponent("hello"), os.FileMode(0o700))
 	actionDigest := digest.MustNewDigest("debian8", remoteexecution.DigestFunction_SHA256, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", 0)
-	buildDirectory, buildDirectoryPath, err := buildDirectoryCreator.GetBuildDirectory(ctx, &actionDigest)
+	buildDirectory, buildDirectoryPath, err := buildDirectoryCreator.GetBuildDirectory(ctx, &actionDigest, int32(0))
 	require.NoError(t, err)
 	require.Nil(t, buildDirectoryPath)
 	require.NoError(t, buildDirectory.Mkdir(path.MustNewComponent("hello"), os.FileMode(0o700)))
@@ -35,7 +35,7 @@ func TestRootBuildDirectoryCreator(t *testing.T) {
 	// Run an action similar to the previous one. It should be
 	// applied against the same underlying build directory.
 	mockBuildDirectory.EXPECT().Mkdir(path.MustNewComponent("world"), os.FileMode(0o700))
-	buildDirectory, buildDirectoryPath, err = buildDirectoryCreator.GetBuildDirectory(ctx, nil)
+	buildDirectory, buildDirectoryPath, err = buildDirectoryCreator.GetBuildDirectory(ctx, nil, int32(0))
 	require.NoError(t, err)
 	require.Nil(t, buildDirectoryPath)
 	require.NoError(t, buildDirectory.Mkdir(path.MustNewComponent("world"), os.FileMode(0o700)))

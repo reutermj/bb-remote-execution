@@ -34,7 +34,7 @@ func TestCleanBuildDirectoryCreator(t *testing.T) {
 		// should be propagated.
 		baseCleaner.EXPECT().Call(ctx).Return(status.Error(codes.Internal, "Cannot remove files from build directory"))
 
-		_, _, err := buildDirectoryCreator.GetBuildDirectory(ctx, &actionDigest)
+		_, _, err := buildDirectoryCreator.GetBuildDirectory(ctx, &actionDigest, int32(0))
 		testutil.RequireEqualStatus(t, status.Error(codes.Internal, "Failed to clean before acquiring build directory: Cannot remove files from build directory"), err)
 	})
 
@@ -44,11 +44,11 @@ func TestCleanBuildDirectoryCreator(t *testing.T) {
 		// invalid afterwards. This should trigger another
 		// clean.
 		baseCleaner.EXPECT().Call(ctx)
-		baseBuildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest).
+		baseBuildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest, int32(0)).
 			Return(nil, nil, status.Error(codes.Internal, "No space left on device"))
 		baseCleaner.EXPECT().Call(ctx)
 
-		_, _, err := buildDirectoryCreator.GetBuildDirectory(ctx, &actionDigest)
+		_, _, err := buildDirectoryCreator.GetBuildDirectory(ctx, &actionDigest, int32(0))
 		require.Equal(t, status.Error(codes.Internal, "No space left on device"), err)
 	})
 
@@ -56,10 +56,10 @@ func TestCleanBuildDirectoryCreator(t *testing.T) {
 		// Successfully obtain a build directory.
 		baseCleaner.EXPECT().Call(ctx)
 		baseBuildDirectory := mock.NewMockBuildDirectory(ctrl)
-		baseBuildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest).
+		baseBuildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest, int32(0)).
 			Return(baseBuildDirectory, ((*path.Trace)(nil)).Append(path.MustNewComponent("base-directory")), nil)
 
-		buildDirectory, buildDirectoryPath, err := buildDirectoryCreator.GetBuildDirectory(ctx, &actionDigest)
+		buildDirectory, buildDirectoryPath, err := buildDirectoryCreator.GetBuildDirectory(ctx, &actionDigest, int32(0))
 		require.NoError(t, err)
 		require.Equal(t, ((*path.Trace)(nil)).Append(path.MustNewComponent("base-directory")), buildDirectoryPath)
 
@@ -85,10 +85,10 @@ func TestCleanBuildDirectoryCreator(t *testing.T) {
 		// Successfully obtain a build directory.
 		baseCleaner.EXPECT().Call(ctx)
 		baseBuildDirectory := mock.NewMockBuildDirectory(ctrl)
-		baseBuildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest).
+		baseBuildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest, int32(0)).
 			Return(baseBuildDirectory, ((*path.Trace)(nil)).Append(path.MustNewComponent("base-directory")), nil)
 
-		buildDirectory, buildDirectoryPath, err := buildDirectoryCreator.GetBuildDirectory(ctx, &actionDigest)
+		buildDirectory, buildDirectoryPath, err := buildDirectoryCreator.GetBuildDirectory(ctx, &actionDigest, int32(0))
 		require.NoError(t, err)
 		require.Equal(t, ((*path.Trace)(nil)).Append(path.MustNewComponent("base-directory")), buildDirectoryPath)
 
@@ -107,10 +107,10 @@ func TestCleanBuildDirectoryCreator(t *testing.T) {
 		// Successfully obtain a build directory.
 		baseCleaner.EXPECT().Call(ctx)
 		baseBuildDirectory := mock.NewMockBuildDirectory(ctrl)
-		baseBuildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest).
+		baseBuildDirectoryCreator.EXPECT().GetBuildDirectory(ctx, &actionDigest, int32(0)).
 			Return(baseBuildDirectory, ((*path.Trace)(nil)).Append(path.MustNewComponent("base-directory")), nil)
 
-		buildDirectory, buildDirectoryPath, err := buildDirectoryCreator.GetBuildDirectory(ctx, &actionDigest)
+		buildDirectory, buildDirectoryPath, err := buildDirectoryCreator.GetBuildDirectory(ctx, &actionDigest, int32(0))
 		require.NoError(t, err)
 		require.Equal(t, ((*path.Trace)(nil)).Append(path.MustNewComponent("base-directory")), buildDirectoryPath)
 

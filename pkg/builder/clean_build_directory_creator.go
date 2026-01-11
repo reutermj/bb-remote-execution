@@ -26,11 +26,11 @@ func NewCleanBuildDirectoryCreator(base BuildDirectoryCreator, idleInvoker *clea
 	}
 }
 
-func (dc *cleanBuildDirectoryCreator) GetBuildDirectory(ctx context.Context, actionDigestIfNotRunInParallel *digest.Digest) (BuildDirectory, *path.Trace, error) {
+func (dc *cleanBuildDirectoryCreator) GetBuildDirectory(ctx context.Context, actionDigestIfNotRunInParallel *digest.Digest, multinodeTaskIndex int32) (BuildDirectory, *path.Trace, error) {
 	if err := dc.idleInvoker.Acquire(ctx); err != nil {
 		return nil, nil, util.StatusWrap(err, "Failed to clean before acquiring build directory")
 	}
-	buildDirectory, buildDirectoryPath, err := dc.base.GetBuildDirectory(ctx, actionDigestIfNotRunInParallel)
+	buildDirectory, buildDirectoryPath, err := dc.base.GetBuildDirectory(ctx, actionDigestIfNotRunInParallel, multinodeTaskIndex)
 	if err != nil {
 		dc.idleInvoker.Release(ctx)
 		return nil, nil, err

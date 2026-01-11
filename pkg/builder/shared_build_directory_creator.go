@@ -35,8 +35,8 @@ func NewSharedBuildDirectoryCreator(base BuildDirectoryCreator, nextParallelActi
 	}
 }
 
-func (dc *sharedBuildDirectoryCreator) GetBuildDirectory(ctx context.Context, actionDigestIfNotRunInParallel *digest.Digest) (BuildDirectory, *path.Trace, error) {
-	parentDirectory, parentDirectoryPath, err := dc.base.GetBuildDirectory(ctx, actionDigestIfNotRunInParallel)
+func (dc *sharedBuildDirectoryCreator) GetBuildDirectory(ctx context.Context, actionDigestIfNotRunInParallel *digest.Digest, multinodeTaskIndex int32) (BuildDirectory, *path.Trace, error) {
+	parentDirectory, parentDirectoryPath, err := dc.base.GetBuildDirectory(ctx, actionDigestIfNotRunInParallel, multinodeTaskIndex)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -68,6 +68,11 @@ func (dc *sharedBuildDirectoryCreator) GetBuildDirectory(ctx context.Context, ac
 		// functions. 16 characters is more than sufficient to
 		// prevent collisions.
 		name = actionDigestIfNotRunInParallel.GetHashString()[:16]
+		// For multi-node tasks (index > 0), append the task index
+		// to create unique directories for each task in the group.
+		if multinodeTaskIndex > 0 {
+			name = name + "_" + strconv.FormatInt(int64(multinodeTaskIndex), 10)
+		}
 	}
 
 	// Create the subdirectory.

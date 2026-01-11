@@ -600,9 +600,56 @@ func (bq *InMemoryBuildQueue) Execute(in *remoteexecution.ExecuteRequest, out re
 	sizeClassIndex, expectedDuration, timeout, initialSizeClassLearner := initialSizeClassSelector.Select(pq.sizeClasses)
 	scq := pq.sizeClassQueues[sizeClassIndex]
 
-	// Create the task.
+	// Create the task(s).
 	actionWithCustomTimeout := *action
 	actionWithCustomTimeout.Timeout = durationpb.New(timeout)
+	i := scq.getOrCreateInvocation(bq, invocationKeys)
+
+	// For multi-node execution, create N tasks in a task group.
+	if multinodeCount > 1 {
+		group := &taskGroup{
+			tasks:         make([]*task, multinodeCount),
+			requiredCount: multinodeCount,
+		}
+		var firstOperation *operation
+		for idx := 0; idx < multinodeCount; idx++ {
+			t := &task{
+				operations:   map[*invocation]*operation{},
+				actionDigest: actionDigest,
+				desiredState: remoteworker.DesiredState_Executing{
+					ActionDigest:        in.ActionDigest,
+					Action:              &actionWithCustomTimeout,
+					QueuedTimestamp:     bq.getCurrentTime(),
+					AuxiliaryMetadata:   auxiliaryMetadata,
+					InstanceNameSuffix:  pq.instanceNamePatcher.PatchInstanceName(instanceName).String(),
+					DigestFunction:      digestFunction.GetEnumValue(),
+					W3CTraceContext:     w3cTraceContext,
+					MultinodeTaskIndex:  int32(idx),
+				},
+				targetID:                requestMetadata.GetTargetId(),
+				expectedDuration:        expectedDuration,
+				initialSizeClassLearner: initialSizeClassLearner,
+				stageChangeWakeup:       make(chan struct{}),
+				group:                   group,
+			}
+			group.tasks[idx] = t
+
+			// Only register the first task for in-flight deduplication.
+			if idx == 0 && !action.DoNotCache {
+				bq.inFlightDeduplicationMap[actionDigest] = t
+				scq.inFlightDeduplicationsNew.Inc()
+			}
+
+			o := t.newOperation(bq, in.ExecutionPolicy.GetPriority(), i, false)
+			if idx == 0 {
+				firstOperation = o
+			}
+			t.schedule(bq)
+		}
+		return firstOperation.waitExecution(bq, out)
+	}
+
+	// Single-node execution: create one task.
 	t := &task{
 		operations:   map[*invocation]*operation{},
 		actionDigest: actionDigest,
@@ -620,20 +667,10 @@ func (bq *InMemoryBuildQueue) Execute(in *remoteexecution.ExecuteRequest, out re
 		initialSizeClassLearner: initialSizeClassLearner,
 		stageChangeWakeup:       make(chan struct{}),
 	}
-
-	// For multi-node execution, create a task group.
-	// TODO: Create N tasks instead of just one.
-	if multinodeCount > 1 {
-		t.group = &taskGroup{
-			tasks:         []*task{t},
-			requiredCount: multinodeCount,
-		}
-	}
 	if !action.DoNotCache {
 		bq.inFlightDeduplicationMap[actionDigest] = t
 		scq.inFlightDeduplicationsNew.Inc()
 	}
-	i := scq.getOrCreateInvocation(bq, invocationKeys)
 	o := t.newOperation(bq, in.ExecutionPolicy.GetPriority(), i, false)
 	t.schedule(bq)
 	return o.waitExecution(bq, out)

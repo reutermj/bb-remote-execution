@@ -112,7 +112,7 @@ func (be *localBuildExecutor) createCharacterDevices(inputRootDirectory BuildDir
 }
 
 func (be *localBuildExecutor) CheckReadiness(ctx context.Context) error {
-	buildDirectory, buildDirectoryPath, err := be.buildDirectoryCreator.GetBuildDirectory(ctx, nil)
+	buildDirectory, buildDirectoryPath, err := be.buildDirectoryCreator.GetBuildDirectory(ctx, nil, 0)
 	if err != nil {
 		return util.StatusWrap(err, "Failed to get build directory")
 	}
@@ -155,7 +155,7 @@ func (be *localBuildExecutor) Execute(ctx context.Context, filePool pool.FilePoo
 	if !action.DoNotCache {
 		actionDigestIfNotRunInParallel = &actionDigest
 	}
-	buildDirectory, buildDirectoryPath, err := be.buildDirectoryCreator.GetBuildDirectory(ctx, actionDigestIfNotRunInParallel)
+	buildDirectory, buildDirectoryPath, err := be.buildDirectoryCreator.GetBuildDirectory(ctx, actionDigestIfNotRunInParallel, request.MultinodeTaskIndex)
 	if err != nil {
 		attachErrorToExecuteResponse(
 			response,
