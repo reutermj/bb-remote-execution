@@ -644,8 +644,9 @@ func (bq *InMemoryBuildQueue) Execute(in *remoteexecution.ExecuteRequest, out re
 			if idx == 0 {
 				firstOperation = o
 			}
-			t.schedule(bq)
 		}
+		// Schedule the entire group atomically, not each task individually.
+		group.schedule(bq)
 		return firstOperation.waitExecution(bq, out)
 	}
 
@@ -2028,6 +2029,17 @@ func (i *invocation) getInvocationState(bq *InMemoryBuildQueue) *buildqueuestate
 	}
 }
 
+// countIdleSynchronizingWorkers recursively counts all idle synchronizing
+// workers in this invocation and all its children. This is used to determine
+// if enough workers are available for multinode task groups.
+func (i *invocation) countIdleSynchronizingWorkers() int {
+	count := len(i.idleSynchronizingWorkers)
+	for _, child := range i.children {
+		count += child.countIdleSynchronizingWorkers()
+	}
+	return count
+}
+
 // decrementExecutingWorkersCount decrements the number of operations in
 // the EXECUTING stage that are part of this invocation.
 //
@@ -2470,6 +2482,100 @@ type taskGroup struct {
 
 	// retryCount tracks group-level retries (not per-task).
 	retryCount int
+}
+
+// schedule schedules a multinode task group. This function will attempt to
+// directly assign all tasks to idle workers if enough workers are available.
+// When not enough workers exist, it will queue the lead task's operation so
+// that workers can pick it up when they become available.
+func (g *taskGroup) schedule(bq *InMemoryBuildQueue) {
+	// All tasks in a group share the same size class queue.
+	leadTask := g.tasks[0]
+	scq := leadTask.getCurrentSizeClassQueue()
+
+	// Count total available idle synchronizing workers.
+	availableWorkers := scq.rootInvocation.countIdleSynchronizingWorkers()
+
+	if availableWorkers >= g.requiredCount {
+		// Enough workers available - assign all tasks atomically.
+		g.assignAllTasks(bq, scq)
+		return
+	}
+
+	// Not enough workers - queue the task group via the lead task's operation.
+	// Only the lead task's operation is enqueued to represent the entire group.
+	// The other N-1 tasks exist but are not individually queued - they are
+	// accessed through group.tasks when the group is assigned.
+	leadTask.registerQueuedStageStarted(bq, &scq.tasksScheduledQueue)
+	for _, o := range leadTask.operations {
+		o.enqueue()
+	}
+
+	// Mark other tasks as queued for metrics, but don't enqueue their operations.
+	for i := 1; i < len(g.tasks); i++ {
+		g.tasks[i].registerQueuedStageStarted(bq, &scq.tasksScheduledQueue)
+	}
+}
+
+// assignAllTasks assigns all tasks in the group to idle workers atomically.
+// This function assumes the caller has verified that enough idle workers exist.
+func (g *taskGroup) assignAllTasks(bq *InMemoryBuildQueue, scq *sizeClassQueue) {
+	// Collect N idle workers from the invocation tree.
+	// Start from the root invocation and collect workers.
+	workers := make([]*worker, 0, g.requiredCount)
+	g.collectIdleWorkers(&scq.rootInvocation, &workers)
+
+	if len(workers) < g.requiredCount {
+		panic("assignAllTasks called without enough idle workers")
+	}
+
+	// Assign each task to a worker.
+	for idx, t := range g.tasks {
+		t.registerQueuedStageStarted(bq, &scq.tasksScheduledWorker)
+		workers[idx].assignUnqueuedTaskAndWakeUp(bq, t, 0)
+	}
+}
+
+// collectIdleWorkers recursively collects idle synchronizing workers from
+// an invocation and its children until we have enough for the group.
+func (g *taskGroup) collectIdleWorkers(i *invocation, workers *[]*worker) {
+	// Collect workers from this invocation.
+	for idx := range i.idleSynchronizingWorkers {
+		if len(*workers) >= g.requiredCount {
+			return
+		}
+		*workers = append(*workers, i.idleSynchronizingWorkers[idx].worker)
+	}
+
+	// Recurse into children.
+	for _, child := range i.children {
+		if len(*workers) >= g.requiredCount {
+			return
+		}
+		g.collectIdleWorkers(child, workers)
+	}
+}
+
+// findAndDequeueIdleWorker finds an idle synchronizing worker in the invocation
+// tree and dequeues it. The worker is returned ready to be assigned a task.
+// This function returns nil if no idle synchronizing workers are available.
+func (scq *sizeClassQueue) findAndDequeueIdleWorker() *worker {
+	i := &scq.rootInvocation
+	for {
+		if len(i.idleSynchronizingWorkers) > 0 {
+			// Found an idle worker in this invocation.
+			w := i.idleSynchronizingWorkers[0].worker
+			w.wakeUp(scq)
+			return w
+		}
+		if i.idleSynchronizingWorkersChildren.Len() > 0 {
+			// Descend into child invocation with idle workers.
+			i = i.idleSynchronizingWorkersChildren[0]
+		} else {
+			// No idle workers found.
+			return nil
+		}
+	}
 }
 
 // task state that is created for every piece of work that needs to be
@@ -2951,8 +3057,45 @@ func (w *worker) assignQueuedTask(bq *InMemoryBuildQueue, t *task, stickinessRet
 	t.reportNonFinalStageChange()
 }
 
+// assignTaskGroup assigns all tasks in a multinode task group to workers atomically.
+// The triggering worker (w) is assigned the lead task, and N-1 additional idle
+// synchronizing workers are found and assigned the remaining tasks.
+// This function assumes the caller has verified that enough idle workers exist
+// (counting this worker as +1).
+func (w *worker) assignTaskGroup(bq *InMemoryBuildQueue, scq *sizeClassQueue, group *taskGroup, stickinessRetained int) bool {
+	// Remove the lead task's operation from the queue first.
+	leadTask := group.tasks[0]
+	for _, o := range leadTask.operations {
+		o.removeQueuedFromInvocation()
+	}
+
+	// Assign lead task to triggering worker (this worker).
+	leadTask.registerQueuedStageFinished(bq)
+	w.assignUnqueuedTask(bq, leadTask, stickinessRetained)
+	leadTask.reportNonFinalStageChange()
+
+	// Collect N-1 additional idle workers and assign remaining tasks.
+	for i := 1; i < group.requiredCount; i++ {
+		otherWorker := scq.findAndDequeueIdleWorker()
+		if otherWorker == nil {
+			// This should not happen if the caller verified worker count.
+			panic("assignTaskGroup called without enough idle workers")
+		}
+		t := group.tasks[i]
+		t.registerQueuedStageFinished(bq)
+		otherWorker.assignUnqueuedTask(bq, t, 0)
+		t.reportNonFinalStageChange()
+	}
+
+	return true
+}
+
 // assignNextQueuedTask determines which queued task is the best
 // candidate for execution and assigns it to the current task.
+// For multinode task groups, this function implements head-of-line blocking:
+// if the highest-priority queued operation belongs to a task group that cannot
+// be assigned (not enough workers), the worker will not skip to lower-priority
+// single-node tasks. This prevents starvation of multinode jobs.
 func (w *worker) assignNextQueuedTask(bq *InMemoryBuildQueue, scq *sizeClassQueue, workerID map[string]string) bool {
 	lastInvocationKeys := w.lastInvocation.invocationKeys
 	pq := scq.platformQueue
@@ -2970,8 +3113,33 @@ func (w *worker) assignNextQueuedTask(bq *InMemoryBuildQueue, scq *sizeClassQueu
 			// One or more operations are enqueued in this
 			// invocation directly. Pick the most preferable
 			// operation.
+			t := i.queuedOperations[0].task
+
+			// Check if this task is part of a multinode group.
+			if group := t.group; group != nil {
+				// Count available idle synchronizing workers.
+				// Add 1 for this worker (it's not in the idle queue yet
+				// because it's the one calling assignNextQueuedTask).
+				availableWorkers := scq.rootInvocation.countIdleSynchronizingWorkers() + 1
+
+				if availableWorkers < group.requiredCount {
+					// Head-of-line block: not enough workers to assign
+					// this group. Return false rather than skipping to
+					// lower-priority tasks. This prevents starvation of
+					// multinode jobs—without this, a steady stream of
+					// single-node jobs could continuously "jump the queue"
+					// ahead of multinode jobs.
+					return false
+				}
+
+				// Enough workers available - assign the entire group.
+				scq.workerInvocationStickinessRetained.Observe(float64(stickinessRetained))
+				return w.assignTaskGroup(bq, scq, group, stickinessRetained)
+			}
+
+			// Single task - assign normally.
 			scq.workerInvocationStickinessRetained.Observe(float64(stickinessRetained))
-			w.assignQueuedTask(bq, i.queuedOperations[0].task, stickinessRetained)
+			w.assignQueuedTask(bq, t, stickinessRetained)
 			return true
 		} else if len(i.queuedChildren) > 0 {
 			// One or more operations are enqueued in a
