@@ -8,8 +8,10 @@ work so the node can be terminated by the infrastructure layer.
 ## Constraints
 
 - Workers run with concurrency=1 (single execution slot per node)
+- Custom hardware that tests use exclusively (cannot be shared across jobs)
 - Custom hardware requires per-node health validation between jobs
 - Job results must always be reported to the scheduler before the node is removed
+- Single worker per node, running as a dedicated non-root user via systemd
 
 ## Approach
 
@@ -25,11 +27,18 @@ liveness probe, systemd watchdog, etc.) then terminates the node.
 
 ## Execution Flow
 
+With concurrency=1, the `IdleInvoker` use count goes 0→1 (Acquire) before every
+job and 1→0 (Release) after, so the cleaner chain fires reliably between each
+action. The full between-job sequence is:
+
 ```
 Job completes
     │
     ▼
-idleInvoker.Release() fires run_command_cleaner
+idleInvoker.Release() fires chained cleaners (in order):
+    1. ProcessTableCleaner — kills leftover daemonized processes
+    2. DirectoryCleaner    — wipes temporary directories
+    3. CommandRunningCleaner — runs health check script
     │
     ▼
 Health check script runs
@@ -52,6 +61,10 @@ Next loop iteration: CheckReadiness() checks readiness_checking_pathnames
                                                  unhealthy node and terminates it
 ```
 
+Note: with concurrency > 1, the cleaners only fire on the idle<->busy boundary
+(when going from all slots free to one busy, and vice versa), not between every
+job. Concurrency=1 is required for per-job health checks.
+
 ## Why Not Terminate in the Cleaner Directly?
 
 `run_command_cleaner` executes inside `cleanRunner.Run()`, **before** the job
@@ -62,12 +75,27 @@ the action on another worker.
 By deferring the actual "stop accepting work" decision to the readiness check
 (which runs after the result is reported), the job result is always safe.
 
+## Process Cleanup
+
+Enable `clean_process_table: true` to kill daemonized processes left behind by
+build actions between jobs. The cleaner enumerates `/proc`, then filters to only
+kill processes that:
+
+1. Have the **same user ID** as bb_runner (or the `run_commands_as` user)
+2. Were **created after** bb_runner started
+
+This prevents it from killing unrelated system processes. Since we run a single
+worker per node under a dedicated user, this is safe without `run_commands_as`.
+
 ## Configuration
 
 ### bb_runner
 
 ```jsonc
 {
+  // Kill daemonized processes left behind by build actions.
+  "clean_process_table": true,
+
   // Health check script. Runs on every idle<->busy transition.
   // Must always exit 0. On health check failure, removes the sentinel file.
   "run_command_cleaner": ["/usr/local/bin/health-check.sh"],
@@ -93,12 +121,33 @@ fi
 exit 0
 ```
 
-### Sentinel File Initialization
+### systemd Unit
 
-The sentinel file must be created at node startup before bb_runner starts,
-e.g. in a systemd ExecStartPre or Kubernetes init container:
+Run bb_runner as a dedicated non-root user. The process table cleaner
+automatically uses the UID of the bb_runner process (via `os.Getuid()`), so
+no `run_commands_as` is needed.
+
+```ini
+[Unit]
+Description=Buildbarn Runner
+After=network.target
+
+[Service]
+User=bbworker
+Group=bbworker
+ExecStartPre=/bin/mkdir -p /var/run/bb-worker
+ExecStartPre=/bin/touch /var/run/bb-worker/healthy
+ExecStart=/usr/local/bin/bb_runner /etc/bb_runner/config.jsonnet
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Create the system user:
 
 ```bash
-mkdir -p /var/run/bb-worker
-touch /var/run/bb-worker/healthy
+useradd --system --no-create-home --shell /usr/sbin/nologin bbworker
 ```
+
+Ensure `bbworker` owns the build directory and sentinel file path.
