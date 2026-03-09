@@ -10,6 +10,7 @@ import (
 	"github.com/buildbarn/bb-remote-execution/pkg/credentials"
 	re_filesystem "github.com/buildbarn/bb-remote-execution/pkg/filesystem"
 	"github.com/buildbarn/bb-remote-execution/pkg/proto/configuration/bb_runner"
+	"github.com/buildbarn/bb-remote-execution/pkg/proto/debugadapter"
 	runner_pb "github.com/buildbarn/bb-remote-execution/pkg/proto/runner"
 	"github.com/buildbarn/bb-remote-execution/pkg/proto/tmp_installer"
 	"github.com/buildbarn/bb-remote-execution/pkg/runner"
@@ -85,6 +86,16 @@ func main() {
 			}
 			tmpInstaller := tmp_installer.NewTemporaryDirectoryInstallerClient(tmpInstallerConnection)
 			r = runner.NewTemporaryDirectoryInstallingRunner(r, tmpInstaller)
+		}
+
+		// Relay DAP messages for debug sessions through bb_debug_adapter.
+		if configuration.DebugAdapter != nil {
+			debugAdapterConnection, err := grpcClientFactory.NewClientFromConfiguration(configuration.DebugAdapter, dependenciesGroup)
+			if err != nil {
+				return util.StatusWrap(err, "Failed to create debug adapter RPC client")
+			}
+			debugAdapterClient := debugadapter.NewDebugAdapterWorkerClient(debugAdapterConnection)
+			r = runner.NewDAPRelayingRunner(r, debugAdapterClient, buildDirectory, buildDirectoryPath, commandCreator, configuration.SetTmpdirEnvironmentVariable)
 		}
 
 		// Kill processes that actions leave behind by daemonizing.

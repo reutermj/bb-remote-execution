@@ -135,4 +135,10 @@ message ApplicationConfiguration {
   // https://github.com/bazelbuild/bazel/blob/master/src/main/java/com/google/devtools/build/lib/exec/local/XcodeLocalEnvProvider.java
   // https://www.smileykeith.com/2021/03/08/locking-xcode-in-bazel/
   map<string, string> apple_xcode_developer_directories = 14;
+
+  // Optional gRPC client for connecting to bb_debug_adapter's
+  // worker-facing API. When set, the runner supports debug sessions:
+  // if a RunRequest includes a debug_invocation_id, the runner relays
+  // the process's stdin/stdout as DAP messages through bb_debug_adapter.
+  buildbarn.configuration.grpc.ClientConfiguration debug_adapter = 15;
 }

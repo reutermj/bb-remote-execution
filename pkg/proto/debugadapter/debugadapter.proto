@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package buildbarn.debugadapter;
+
+import "google/protobuf/empty.proto";
+
+option go_package = "github.com/buildbarn/bb-remote-execution/pkg/proto/debugadapter";
+
+// Worker-facing API for bb_debug_adapter. The runner calls these RPCs
+// to register a debug session and relay DAP messages between the
+// launched process and the debug adapter service.
+service DebugAdapterWorker {
+  // Register a new debug session for the given invocation. Must be
+  // called before sending or receiving messages.
+  rpc RegisterSession(RegisterSessionRequest) returns (google.protobuf.Empty);
+
+  // Push DAP messages from the worker (process stdout) to the session.
+  rpc SendMessages(SendMessagesRequest) returns (google.protobuf.Empty);
+
+  // Stream DAP messages from the client to the worker (process stdin).
+  // Supports reconnection: the worker reports the last sequence number
+  // it received and resumes from there.
+  rpc ReceiveMessages(ReceiveMessagesRequest)
+      returns (stream ReceiveMessagesResponse);
+}
+
+// Client-facing API for bb_debug_adapter, fronted via bb_storage. The
+// DAP client (e.g., VS Code extension) calls these RPCs.
+service DebugAdapterClient {
+  // Push DAP messages from the client to the session.
+  rpc SendMessages(SendMessagesRequest) returns (google.protobuf.Empty);
+
+  // Stream DAP messages from the worker to the client.
+  // Supports reconnection via last_received_sequence.
+  rpc ReceiveMessages(ReceiveMessagesRequest)
+      returns (stream ReceiveMessagesResponse);
+
+  // Explicitly end the debug session. Signals the worker to tear down
+  // the DAP server process.
+  rpc EndSession(EndSessionRequest) returns (google.protobuf.Empty);
+}
+
+message RegisterSessionRequest {
+  string invocation_id = 1;
+}
+
+message EndSessionRequest {
+  string invocation_id = 1;
+}
+
+message SendMessagesRequest {
+  string invocation_id = 1;
+
+  // Individual DAP messages as opaque bytes. Each entry is one complete
+  // DAP JSON message (without Content-Length framing).
+  repeated bytes messages = 2;
+}
+
+message ReceiveMessagesRequest {
+  string invocation_id = 1;
+
+  // Last sequence number successfully received. Messages with sequence
+  // numbers greater than this value will be (re)sent. Use 0 to receive
+  // from the beginning.
+  int64 last_received_sequence = 2;
+}
+
+message ReceiveMessagesResponse {
+  // A single DAP message as opaque bytes (without Content-Length
+  // framing). Empty payload indicates a heartbeat keepalive.
+  bytes payload = 1;
+
+  // Sequence number assigned by bb_debug_adapter. Monotonically
+  // increasing per direction per session. Used for reconnection.
+  int64 sequence = 2;
+}

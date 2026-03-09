@@ -58,6 +58,11 @@ message RunRequest {
   // Path where files may be stored that are attached to the REv2
   // ExecuteResponse in the form of server logs.
   string server_logs_directory = 8;
+
+  // Optional. When set, the runner treats the process's stdin/stdout as
+  // DAP (Debug Adapter Protocol) messages and relays them through
+  // bb_debug_adapter using this value as the session invocation ID.
+  string debug_invocation_id = 9;
 }
 
 message RunResponse {
