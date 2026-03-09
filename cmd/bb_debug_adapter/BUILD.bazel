@@ -1,0 +1,39 @@
+load("@com_github_buildbarn_bb_storage//tools:container.bzl", "container_push_official", "multiarch_go_image")
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "bb_debug_adapter_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/buildbarn/bb-remote-execution/cmd/bb_debug_adapter",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//pkg/debugadapter",
+        "//pkg/proto/configuration/bb_debug_adapter",
+        "//pkg/proto/debugadapter",
+        "@com_github_buildbarn_bb_storage//pkg/global",
+        "@com_github_buildbarn_bb_storage//pkg/grpc",
+        "@com_github_buildbarn_bb_storage//pkg/program",
+        "@com_github_buildbarn_bb_storage//pkg/util",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//status",
+    ],
+)
+
+go_binary(
+    name = "bb_debug_adapter",
+    embed = [":bb_debug_adapter_lib"],
+    pure = "on",
+    visibility = ["//visibility:public"],
+)
+
+multiarch_go_image(
+    name = "bb_debug_adapter_container",
+    binary = ":bb_debug_adapter",
+)
+
+container_push_official(
+    name = "bb_debug_adapter_container_push",
+    component = "bb-debug-adapter",
+    image = ":bb_debug_adapter_container",
+)

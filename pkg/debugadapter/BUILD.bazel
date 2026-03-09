@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "debugadapter",
+    srcs = [
+        "client_server.go",
+        "session.go",
+        "session_store.go",
+        "worker_server.go",
+    ],
+    importpath = "github.com/buildbarn/bb-remote-execution/pkg/debugadapter",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/proto/debugadapter",
+        "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//status",
+        "@org_golang_google_protobuf//types/known/emptypb",
+    ],
+)

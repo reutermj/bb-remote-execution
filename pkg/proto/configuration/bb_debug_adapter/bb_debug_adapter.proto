@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package buildbarn.configuration.bb_debug_adapter;
+
+import "github.com/buildbarn/bb-storage/pkg/proto/configuration/global/global.proto";
+import "github.com/buildbarn/bb-storage/pkg/proto/configuration/grpc/grpc.proto";
+import "google/protobuf/duration.proto";
+
+option go_package = "github.com/buildbarn/bb-remote-execution/pkg/proto/configuration/bb_debug_adapter";
+
+message ApplicationConfiguration {
+  // gRPC servers to spawn for the client-facing DAP relay API.
+  // This is typically fronted via bb_storage.
+  repeated buildbarn.configuration.grpc.ServerConfiguration
+      client_grpc_servers = 1;
+
+  // gRPC servers to spawn for the worker-facing DAP relay API.
+  // Workers connect directly to this endpoint.
+  repeated buildbarn.configuration.grpc.ServerConfiguration
+      worker_grpc_servers = 2;
+
+  // How long a session can be idle (no messages in either direction)
+  // before it is automatically reaped.
+  google.protobuf.Duration inactivity_timeout = 3;
+
+  // Interval between heartbeat keepalives on ReceiveMessages streams.
+  google.protobuf.Duration heartbeat_interval = 4;
+
+  // Common configuration options that apply to all Buildbarn binaries.
+  buildbarn.configuration.global.Configuration global = 5;
+}
